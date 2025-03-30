@@ -1,204 +1,748 @@
-# Rust Docs MCP Server
+# git-chglog
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![git-chglog](https://raw.githubusercontent.com/git-chglog/artwork/master/repo-banner%402x.png)
 
+[![godoc.org](https://img.shields.io/badge/godoc-reference-blue.svg?style=flat-square)](https://godoc.org/github.com/git-chglog/git-chglog)
+[![Actions Status](https://github.com/git-chglog/git-chglog/workflows/tests/badge.svg)](https://github.com/git-chglog/git-chglog/actions)
+[![Coverage Status](https://img.shields.io/coveralls/github/git-chglog/git-chglog.svg?style=flat-square)](https://coveralls.io/github/git-chglog/git-chglog?branch=master)
+[![MIT License](http://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](https://github.com/git-chglog/git-chglog/blob/master/LICENSE)
 
-⭐ **Like this project? Please [star the repository](https://github.com/Govcraft/rust-docs-mcp-server) on GitHub to show your support and stay updated!** ⭐
+> CHANGELOG generator implemented in Go (Golang).
+> _Anytime, anywhere, Write your CHANGELOG._
 
-## Motivation
+## Table of Contents
 
-Modern AI-powered coding assistants (like Cursor, Cline, Roo Code, etc.) excel at understanding code structure and syntax but often struggle with the specifics of rapidly evolving libraries and frameworks, especially in ecosystems like Rust where crates are updated frequently. Their training data cutoff means they may lack knowledge of the latest APIs, leading to incorrect or outdated code suggestions.
-
-This MCP server addresses this challenge by providing a focused, up-to-date knowledge source for a specific Rust crate. By running an instance of this server for a crate (e.g., `serde`, `tokio`, `reqwest`), you give your LLM coding assistant a tool (`query_rust_docs`) it can use *before* writing code related to that crate.
-
-When instructed to use this tool, the LLM can ask specific questions about the crate's API or usage and receive answers derived directly from the *current* documentation. This significantly improves the accuracy and relevance of the generated code, reducing the need for manual correction and speeding up development.
-
-Multiple instances of this server can be run concurrently, allowing the LLM assistant to access documentation for several different crates during a coding session.
-
-This server fetches the documentation for a specified Rust crate, generates embeddings for the content, and provides an MCP tool to answer questions about the crate based on the documentation context.
+- [git-chglog](#git-chglog)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+  - [How it works](#how-it-works)
+  - [Getting Started](#getting-started)
+    - [Installation](#installation)
+      - [Homebrew (for macOS users)](#homebrew-for-macos-users)
+      - [Scoop (for Windows users)](#scoop-for-windows-users)
+      - [asdf](#asdf)
+      - [Go users](#go-users)
+    - [Docker](#docker)
+    - [Test Installation](#test-installation)
+    - [Quick Start](#quick-start)
+  - [CLI Usage](#cli-usage)
+    - [`tag query`](#tag-query)
+  - [Configuration](#configuration)
+    - [`bin`](#bin)
+    - [`style`](#style)
+    - [`template`](#template)
+    - [`info`](#info)
+    - [`options`](#options)
+      - [`options.sort`](#optionssort)
+      - [`options.commits`](#optionscommits)
+      - [`options.commit_groups`](#optionscommit_groups)
+      - [`options.header`](#optionsheader)
+      - [`options.issues`](#optionsissues)
+      - [`options.refs`](#optionsrefs)
+      - [`options.merges`](#optionsmerges)
+      - [`options.reverts`](#optionsreverts)
+      - [`options.notes`](#optionsnotes)
+  - [Templates](#templates)
+  - [Supported Styles](#supported-styles)
+  - [Jira Integration](#jira-integration)
+    - [1. Change the header parse pattern to recognize Jira issue id in the configure file](#1-change-the-header-parse-pattern-to-recognize-jira-issue-id-in-the-configure-file)
+    - [2. Add Jira configuration to the configure file](#2-add-jira-configuration-to-the-configure-file)
+    - [3. Update the template to show Jira data](#3-update-the-template-to-show-jira-data)
+  - [FAQ](#faq)
+  - [TODO](#todo)
+  - [Thanks](#thanks)
+  - [Contributing](#contributing)
+  - [Development](#development)
+  - [Release Process](#release-process)
+  - [Feedback](#feedback)
+  - [CHANGELOG](#changelog)
+  - [Related Projects](#related-projects)
+  - [License](#license)
 
 ## Features
 
-*   **Targeted Documentation:** Focuses on a single Rust crate per server instance.
-*   **Semantic Search:** Uses OpenAI's `text-embedding-3-small` model to find the most relevant documentation sections for a given question.
-*   **LLM Summarization:** Leverages OpenAI's `gpt-4o-mini-2024-07-18` model to generate concise answers based *only* on the retrieved documentation context.
-*   **Caching:** Caches generated documentation content and embeddings in the user's XDG data directory (`~/.local/share/rustdocs-mcp-server/` or similar) to speed up subsequent launches for the same crate and version.
-*   **MCP Integration:** Runs as a standard MCP server over stdio, exposing tools and resources.
+- :recycle: High portability
+  - It works with single binary. Therefore, any project (environment) can be used.
+- :beginner: Simple usability
+  - The CLI usage is very simple and has low learning costs.
+  - For example, the simplest command is `$ git-chglog`.
+- :rocket: High flexibility
+  - Commit message format and ...
+  - CHANGELOG's style (Template) and ...
+  - etc ...
 
-## Prerequisites
+## How it works
 
-*   **OpenAI API Key:** Needed for generating embeddings and summarizing answers. The server expects this key to be available in the `OPENAI_API_KEY` environment variable. (The server also requires network access to download crate dependencies and interact with the OpenAI API).
+`git-chglog` internally uses the `git` command to get data to include in the
+CHANGELOG. The basic steps are as follows.
 
-## Installation
+1. Get all the tags.
+1. Get the commits contained between `tagA` and `tagB`.
+1. Execute with all tags corresponding to [tag query](#tag-query) that were specified in Step 1 and 2.
 
-The recommended way to install is to download the pre-compiled binary for your operating system from the [GitHub Releases page](https://github.com/Govcraft/rust-docs-mcp-server/releases).
+## Getting Started
 
-1.  Go to the [Releases page](https://github.com/Govcraft/rust-docs-mcp-server/releases).
-2.  Download the appropriate archive (`.zip` for Windows, `.tar.gz` for Linux/macOS) for your system.
-3.  Extract the `rustdocs_mcp_server` (or `rustdocs_mcp_server.exe`) binary.
-4.  Place the binary in a directory included in your system's `PATH` environment variable (e.g., `/usr/local/bin`, `~/bin`).
+We will start with installation and introduce the steps up to the automatic generation
+of the configuration file and template.
 
-### Building from Source (Alternative)
+### Installation
 
-If you prefer to build from source, you will need the [Rust Toolchain](https://rustup.rs/) installed.
+Please install `git-chglog` in a way that matches your environment.
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/Govcraft/rust-docs-mcp-server.git
-    cd rust-docs-mcp-server
-    ```
-2.  **Build the server:**
-    ```bash
-    cargo build --release
-    ```
-## Usage
-
-### Running the Server
-
-The server is launched from the command line and requires a single argument: the **Package ID Specification** for the target crate. This specification follows the format used by Cargo (e.g., `crate_name`, `crate_name@version_req`). For the full specification details, see `man cargo-pkgid` or the [Cargo documentation](https://doc.rust-lang.org/cargo/reference/pkgid-spec.html).
+#### [Homebrew](https://brew.sh) (for macOS users)
 
 ```bash
-# Set the API key (replace with your actual key)
-export OPENAI_API_KEY="sk-..."
-
-# Example: Run server for the latest 1.x version of serde
-./target/release/rustdocs_mcp_server "serde@^1.0"
-
-# Example: Run server for a specific version of reqwest
-./target/release/rustdocs_mcp_server "reqwest@0.12.0"
-
-# Example: Run server for the latest version of tokio
-./target/release/rustdocs_mcp_server tokio
+brew tap git-chglog/git-chglog
+brew install git-chglog
 ```
 
-On the first run for a specific crate version, the server will:
-1.  Download the crate documentation using `cargo doc`.
-2.  Parse the HTML documentation.
-3.  Generate embeddings for the documentation content using the OpenAI API (this may take some time and incur costs, though typically only fractions of a US penny for most crates, potentially a few pennies for crates with exceptionally large documentation).
-4.  Cache the documentation content and embeddings.
-5.  Start the MCP server.
+#### [Scoop](https://scoop.sh) (for Windows users)
 
-Subsequent runs for the same crate version will load the data from the cache, making startup much faster.
-
-### MCP Interaction
-
-The server communicates using the Model Context Protocol over standard input/output (stdio). It exposes the following:
-
-*   **Tool: `query_rust_docs`**
-    *   **Description:** Query documentation for the specific Rust crate the server was started for, using semantic search and LLM summarization.
-    *   **Input Schema:**
-        ```json
-        {
-          "type": "object",
-          "properties": {
-            "question": {
-              "type": "string",
-              "description": "The specific question about the crate's API or usage."
-            }
-          },
-          "required": ["question"]
-        }
-        ```
-    *   **Output:** A text response containing the answer generated by the LLM based on the relevant documentation context, prefixed with `From <crate_name> docs: `.
-    *   **Example MCP Call:**
-        ```json
-        {
-          "jsonrpc": "2.0",
-          "method": "callTool",
-          "params": {
-            "tool_name": "query_rust_docs",
-            "arguments": {
-              "question": "How do I make a simple GET request with reqwest?"
-            }
-          },
-          "id": 1
-        }
-        ```
-
-*   **Resource: `crate://<crate_name>`**
-    *   **Description:** Provides the name of the Rust crate this server instance is configured for.
-    *   **URI:** `crate://<crate_name>` (e.g., `crate://serde`, `crate://reqwest`)
-    *   **Content:** Plain text containing the crate name.
-
-*   **Logging:** The server sends informational logs (startup messages, query processing steps) back to the MCP client via `logging/message` notifications.
-
-
-### Example Client Configuration (Roo Code)
-
-You can configure MCP clients like Roo Code to run multiple instances of this server, each targeting a different crate. Here's an example snippet for Roo Code's `mcp_settings.json` file, configuring servers for `reqwest` and `sqlx`:
-
-```json
-{
-  "mcpServers": {
-    "rust-docs-reqwest": {
-      "command": "/path/to/your/rustdocs_mcp_server",
-      "args": [
-        "reqwest@0.12"
-      ],
-      "env": {
-        "OPENAI_API_KEY": "YOUR_OPENAI_API_KEY_HERE"
-      },
-      "disabled": false,
-      "alwaysAllow": []
-    },
-    "rust-docs-sqlx": {
-      "command": "rustdocs_mcp_server",
-      "args": [
-        "sqlx@0.8.3"
-      ],
-      "env": {
-        "OPENAI_API_KEY": "YOUR_OPENAI_API_KEY_HERE"
-      },
-      "disabled": false,
-      "alwaysAllow": []
-    }
-  }
-}
+```bash
+scoop install git-chglog
 ```
 
-**Note:**
-*   Replace `/path/to/your/rustdocs_mcp_server` with the actual path to the compiled binary on your system if it isn't in your PATH.
-*   Replace `YOUR_OPENAI_API_KEY_HERE` with your actual OpenAI API key.
-*   The keys (`rust-docs-reqwest`, `rust-docs-sqlx`) are arbitrary names you choose to identify the server instances within Roo Code.
+#### [asdf](https://asdf-vm.com/)
 
-### Caching
+```bash
+asdf plugin-add git-chglog https://github.com/GoodwayGroup/asdf-git-chglog.git
+asdf install git-chglog latest
+```
 
-*   **Location:** Cached documentation and embeddings are stored in the XDG data directory, typically under `~/.local/share/rustdocs-mcp-server/<crate_name>/<sanitized_version_req>/embeddings.bin`. The `sanitized_version_req` is derived from the version requirement provided at startup.
-*   **Format:** Data is cached using `bincode` serialization.
-*   **Regeneration:** If the cache file is missing, corrupted, or cannot be decoded, the server will automatically regenerate the documentation and embeddings.
+#### Go users
 
-## How it Works
+```bash
+go install github.com/git-chglog/git-chglog/cmd/git-chglog@latest
+```
 
-1.  **Initialization:** Takes the crate specification from the command line.
-2.  **Cache Check:** Looks for a pre-existing cache file for the specific crate and version requirement.
-3.  **Documentation Generation (if cache miss):**
-    *   Creates a temporary Rust project depending only on the target crate.
-    *   Runs `cargo doc` using the `cargo` library API to generate HTML documentation in the temporary directory.
-4.  **Content Extraction (if cache miss):**
-    *   Walks the generated HTML files.
-    *   Uses the `scraper` crate to parse each HTML file and extract text content from the main content area (`<section id="main-content">`).
-5.  **Embedding Generation (if cache miss):**
-    *   Uses the `async-openai` crate and `tiktoken-rs` to generate embeddings for each extracted document chunk using the `text-embedding-3-small` model.
-    *   Calculates the estimated cost based on the number of tokens processed.
-6.  **Caching (if cache miss):** Saves the extracted document content and their corresponding embeddings to the cache file using `bincode`.
-7.  **Server Startup:** Initializes the `RustDocsServer` with the loaded/generated documents and embeddings.
-8.  **MCP Serving:** Starts the MCP server using `rmcp` over stdio.
-9.  **Query Handling (`query_rust_docs` tool):**
-    *   Generates an embedding for the user's question.
-    *   Calculates the cosine similarity between the question embedding and all cached document embeddings.
-    *   Identifies the document chunk with the highest similarity.
-    *   Sends the user's question and the content of the best-matching document chunk to the `gpt-4o-mini-2024-07-18` model via the OpenAI API.
-    *   The LLM is prompted to answer the question based *only* on the provided context.
-    *   Returns the LLM's response to the MCP client.
+### [Docker](https://www.docker.com/)
+The compiled docker images are maintained on [quay.io](https://quay.io/repository/git-chglog/git-chglog). 
+We maintain the following tags:
+- `edge`: Image that is build from the current `HEAD` of the main line branch.
+- `latest`: Image that is built from the [latest released version](https://github.com/git-chglog/git-chglog/releases)
+- `x.y.y` (versions): Images that are build from the tagged versions within Github.
+```bash
+docker pull quay.io/git-chglog/git-chglog:latest
+docker run -v "$PWD":/workdir quay.io/git-chglog/git-chglog --version
+```
+---
+
+If you are using another platform, you can download a binary from the [releases page]
+and place it in a directory in your `$PATH`.
+
+### Test Installation
+
+You can check with the following command whether the `git-chglog` command was
+included in a directory that is in your `$PATH`.
+
+```bash
+$ git-chglog --version
+# outputs the git-chglog version
+```
+
+### Quick Start
+
+`git-chglog` requires configuration files and templates to generate a CHANGELOG.
+
+However, it is a waste of time to create configuration files and templates from scratch.
+
+Therefore we recommend using the `--init` option which will create them interactively :+1:
+
+```bash
+git-chglog --init
+```
+
+![init option demo](./docs/assets/init.gif)
+
+---
+
+You are now ready for configuration files and templates!
+
+Let's immediately generate a CHANGELOG of your project.
+By doing the following simple command, Markdown for your CHANGELOG is displayed
+on stdout.
+
+```bash
+git-chglog
+```
+
+Use `-o` (`--output`) option if you want to output to a file instead of stdout.
+
+```bash
+git-chglog -o CHANGELOG.md
+```
+
+---
+
+You now know basic usage of `git-chglog`!
+
+In order to make a better CHANGELOG, please refer to the following document and
+customize it.
+
+## CLI Usage
+
+```bash
+$ git-chglog --help
+
+USAGE:
+  git-chglog [options] <tag query>
+
+    There are the following specification methods for <tag query>.
+
+    1. <old>..<new> - Commit contained in <old> tags from <new>.
+    2. <name>..     - Commit from the <name> to the latest tag.
+    3. ..<name>     - Commit from the oldest tag to <name>.
+    4. <name>       - Commit contained in <name>.
+
+OPTIONS:
+  --init                      generate the git-chglog configuration file in interactive (default: false)
+  --path value                Filter commits by path(s). Can use multiple times.
+  --config value, -c value    specifies a different configuration file to pick up (default: ".chglog/config.yml")
+  --template value, -t value  specifies a template file to pick up. If not specified, use the one in config
+  --repository-url value      specifies git repo URL. If not specified, use 'repository_url' in config
+  --output value, -o value    output path and filename for the changelogs. If not specified, output to stdout
+  --next-tag value            treat unreleased commits as specified tags (EXPERIMENTAL)
+  --silent                    disable stdout output (default: false)
+  --no-color                  disable color output (default: false) [$NO_COLOR]
+  --no-emoji                  disable emoji output (default: false) [$NO_EMOJI]
+  --no-case                   disable case sensitive filters (default: false)
+  --tag-filter-pattern value  Regular expression of tag filter. Is specified, only matched tags will be picked
+  --jira-url value            Jira URL [$JIRA_URL]
+  --jira-username value       Jira username [$JIRA_USERNAME]
+  --jira-token value          Jira token [$JIRA_TOKEN]
+  --sort value                Specify how to sort tags; currently supports "date" or by "semver" (default: date)
+  --help, -h                  show help (default: false)
+  --version, -v               print the version (default: false)
+
+EXAMPLE:
+
+  $ git-chglog
+
+    If <tag query> is not specified, it corresponds to all tags.
+    This is the simplest example.
+
+  $ git-chglog 1.0.0..2.0.0
+
+    The above is a command to generate CHANGELOG including commit of 1.0.0 to 2.0.0.
+
+  $ git-chglog 1.0.0
+
+    The above is a command to generate CHANGELOG including commit of only 1.0.0.
+
+  $ git-chglog $(git describe --tags $(git rev-list --tags --max-count=1))
+
+    The above is a command to generate CHANGELOG with the commit included in the latest tag.
+
+  $ git-chglog --output CHANGELOG.md
+
+    The above is a command to output to CHANGELOG.md instead of standard output.
+
+  $ git-chglog --config custom/dir/config.yml
+
+    The above is a command that uses a configuration file placed other than ".chglog/config.yml".
+
+  $ git-chglog --path path/to/my/component --output CHANGELOG.component.md
+
+    Filter commits by specific paths or files in git and output to a component specific changelog.
+```
+
+### `tag query`
+
+You can specify which commits to include in the generation of CHANGELOG using `<tag query>`.
+
+The table below shows Query patterns and summaries, and Query examples.
+
+| Query          | Description                                    | Example                     |
+|:---------------|:-----------------------------------------------|:----------------------------|
+| `<old>..<new>` | Commit contained in `<new>` tags from `<old>`. | `$ git-chglog 1.0.0..2.0.0` |
+| `<name>..`     | Commit from the `<name>` to the latest tag.    | `$ git-chglog 1.0.0..`      |
+| `..<name>`     | Commit from the oldest tag to `<name>`.        | `$ git-chglog ..2.0.0`      |
+| `<name>`       | Commit contained in `<name>`.                  | `$ git-chglog 1.0.0`        |
+
+## Configuration
+
+The `git-chglog` configuration is a yaml file. The default location is
+`.chglog/config.yml`.
+
+Below is a complete list that you can use with `git-chglog`.
+
+```yaml
+bin: git
+style: ""
+template: CHANGELOG.tpl.md
+info:
+  title: CHANGELOG
+  repository_url: https://github.com/git-chglog/git-chglog
+
+options:
+  tag_filter_pattern: '^v'
+  sort: "date"
+
+  commits:
+    filters:
+      Type:
+        - feat
+    sort_by: Scope
+
+  commit_groups:
+    group_by: Type
+    sort_by: Title
+    title_order:
+      - feat
+    title_maps:
+      feat: Features
+
+  header:
+    pattern: "<regexp>"
+    pattern_maps:
+      - PropName
+
+  issues:
+    prefix:
+      - #
+
+  refs:
+    actions:
+      - Closes
+      - Fixes
+
+  merges:
+    pattern: "^Merge branch '(\\w+)'$"
+    pattern_maps:
+      - Source
+
+  reverts:
+    pattern: "^Revert \"([\\s\\S]*)\"$"
+    pattern_maps:
+      - Header
+
+  notes:
+    keywords:
+      - BREAKING CHANGE
+```
+
+### `bin`
+
+Git execution command.
+
+| Required | Type   | Default | Description |
+|:---------|:-------|:--------|:------------|
+| N        | String | `"git"` | -           |
+
+### `style`
+
+CHANGELOG style. Automatic linking of issues and notices, initial value setting
+such as merges etc. are done automatically.
+
+| Required | Type   | Default  | Description                                            |
+|:---------|:-------|:---------|:-------------------------------------------------------|
+| N        | String | `"none"` | Should be `"github"` `"gitlab"` `"bitbucket"` `"none"` |
+
+### `template`
+
+Path for the template file. It is specified by a relative path from the setting
+file. Absolute paths are also ok.
+
+| Required | Type   | Default              | Description |
+|:---------|:-------|:---------------------|:------------|
+| N        | String | `"CHANGELOG.tpl.md"` | -           |
+
+### `info`
+
+Metadata for CHANGELOG. Depending on Style, it is sometimes used in processing,
+so it is recommended to specify it.
+
+| Key              | Required | Type   | Default       | Description            |
+|:-----------------|:---------|:-------|:--------------|:-----------------------|
+| `title`          | N        | String | `"CHANGELOG"` | Title of CHANGELOG.    |
+| `repository_url` | N        | String | none          | URL of git repository. |
+
+### `options`
+
+Options used to process commits.
+
+#### `options.sort`
+
+Options concerning the acquisition and sort of commits.
+
+| Required | Type        | Default   | Description                                                                                                         |
+|:---------|:------------|:----------|:--------------------------------------------------------------------------------------------------------------------|
+| N        | String      | `"date"` | Defines how tags are sorted in the generated change log. Values: "date", "semver". |
+
+#### `options.commits`
+
+Options concerning the acquisition and sort of commits.
+
+| Key       | Required | Type        | Default   | Description                                                                                         |
+|:----------|:---------|:------------|:----------|:----------------------------------------------------------------------------------------------------|
+| `filters` | N        | Map in List | none      | Filter by using `Commit` properties and values. Filtering is not done by specifying an empty value. |
+| `sort_by` | N        | String      | `"Scope"` | Property name to use for sorting `Commit`. See [Commit].                                            |
+
+#### `options.commit_groups`
+
+Options for groups of commits.
+
+| Key           | Required | Type        | Default   | Description                                                                                |
+|:--------------|:---------|:------------|:----------|:-------------------------------------------------------------------------------------------|
+| `group_by`    | N        | String      | `"Type"`  | Property name of `Commit` to be grouped into `CommitGroup`. See [CommitGroup][doc-commit]. |
+| `sort_by`     | N        | String      | `"Title"` | Property name to use for sorting `CommitGroup`. See [CommitGroup][doc-commit-group].       |
+| `title_order` | N        | List        | none      | Predefined order of titles to use for sorting `CommitGroup`. Only if `sort_by` is `Custom` |
+| `title_maps`  | N        | Map in List | none      | Map for `CommitGroup` title conversion.                                                    |
+
+#### `options.header`
+
+This option is used for parsing the commit header.
+
+| Key            | Required | Type   | Default | Description                                                                                             |
+|:---------------|:---------|:-------|:--------|:--------------------------------------------------------------------------------------------------------|
+| `pattern`      | Y        | String | none    | A regular expression to use for parsing the commit header.                                              |
+| `pattern_maps` | Y        | List   | none    | A rule for mapping the result of `HeaderPattern` to the property of `Commit`. See [Commit][doc-commit]. |
+
+#### `options.issues`
+
+This option is used to detect issues.
+
+| Key      | Required | Type | Default | Description                                |
+|:---------|:---------|:-----|:--------|:-------------------------------------------|
+| `prefix` | N        | List | none    | Prefix used for issues. (e.g. `#`, `#gh-`) |
+
+#### `options.refs`
+
+This option is for parsing references.
+
+| Key       | Required | Type | Default | Description                                    |
+|:----------|:---------|:-----|:--------|:-----------------------------------------------|
+| `actions` | N        | List | none    | Word list of `Ref.Action`. See [Ref][doc-ref]. |
+
+#### `options.merges`
+
+Options to detect and parse merge commits.
+
+| Key            | Required | Type   | Default | Description                               |
+|:---------------|:---------|:-------|:--------|:------------------------------------------|
+| `pattern`      | N        | String | none    | Similar to `options.header.pattern`.      |
+| `pattern_maps` | N        | List   | none    | Similar to `options.header.pattern_maps`. |
+
+#### `options.reverts`
+
+Options to detect and parse revert commits.
+
+| Key            | Required | Type   | Default | Description                               |
+|:---------------|:---------|:-------|:--------|:------------------------------------------|
+| `pattern`      | N        | String | none    | Similar to `options.header.pattern`.      |
+| `pattern_maps` | N        | List   | none    | Similar to `options.header.pattern_maps`. |
+
+#### `options.notes`
+
+Options to detect notes contained in commit bodies.
+
+| Key        | Required | Type | Default | Description                                                                                          |
+|:-----------|:---------|:-----|:--------|:-----------------------------------------------------------------------------------------------------|
+| `keywords` | N        | List | none    | Keyword list to find `Note`. A semicolon is a separator, like `<keyword>:` (e.g. `BREAKING CHANGE`). |
+
+## Templates
+
+The `git-chglog` template uses the `text/template` package and enhanced templating functions provided by [Sprig]. For basic usage please refer to the following.
+
+- [text/template](https://golang.org/pkg/text/template/)
+- [Sprig]
+
+We have implemented the following custom template functions. These override functions provided by [Sprig].
+
+| Name         | Signature                                     | Description                                                                   |
+| :----------- | :-------------------------------------------- | :---------------------------------------------------------------------------- |
+| `contains`   | `func(s, substr string) bool`                 | Reports whether `substr` is within `s` using `strings.Contains`               |
+| `datetime`   | `func(layout string, input time.Time) string` | Generate a formatted Date string based on layout                              |
+| `hasPrefix`  | `func(s, prefix string) bool`                 | Tests whether the string `s` begins with `prefix` using `strings.HasPrefix`   |
+| `hasSuffix`  | `func(s, suffix string) bool`                 | Tests whether the string `s` ends with `suffix`. using `strings.HasPrefix`    |
+| `indent`     | `func(s string, n int) string`                | Indent all lines of `s` by `n` spaces                                         |
+| `replace`    | `func(s, old, new string, n int) string`      | Replace `old` with `new` within string `s`, `n` times using `strings.Replace` |
+| `upperFirst` | `func(s string) string`                       | Upper case the first character of a string                                    |
+
+If you are not satisfied with the prepared template please try customizing one.
+
+---
+
+The basic templates are as follows.
+
+**Example:**
+
+```markdown
+{{ if .Versions -}}
+<a name="unreleased"></a>
+## [Unreleased]
+
+{{ if .Unreleased.CommitGroups -}}
+{{ range .Unreleased.CommitGroups -}}
+### {{ .Title }}
+{{ range .Commits -}}
+- {{ if .Scope }}**{{ .Scope }}:** {{ end }}{{ .Subject }}
+{{ end }}
+{{ end -}}
+{{ end -}}
+{{ end -}}
+
+{{ range .Versions }}
+<a name="{{ .Tag.Name }}"></a>
+## {{ if .Tag.Previous }}[{{ .Tag.Name }}]{{ else }}{{ .Tag.Name }}{{ end }} - {{ datetime "2006-01-02" .Tag.Date }}
+{{ range .CommitGroups -}}
+### {{ .Title }}
+{{ range .Commits -}}
+- {{ if .Scope }}**{{ .Scope }}:** {{ end }}{{ .Subject }}
+{{ end }}
+{{ end -}}
+
+{{- if .RevertCommits -}}
+### Reverts
+{{ range .RevertCommits -}}
+- {{ .Revert.Header }}
+{{ end }}
+{{ end -}}
+
+{{- if .MergeCommits -}}
+### Pull Requests
+{{ range .MergeCommits -}}
+- {{ .Header }}
+{{ end }}
+{{ end -}}
+
+{{- if .NoteGroups -}}
+{{ range .NoteGroups -}}
+### {{ .Title }}
+{{ range .Notes }}
+{{ .Body }}
+{{ end }}
+{{ end -}}
+{{ end -}}
+{{ end -}}
+
+{{- if .Versions }}
+[Unreleased]: {{ .Info.RepositoryURL }}/compare/{{ $latest := index .Versions 0 }}{{ $latest.Tag.Name }}...HEAD
+{{ range .Versions -}}
+{{ if .Tag.Previous -}}
+[{{ .Tag.Name }}]: {{ $.Info.RepositoryURL }}/compare/{{ .Tag.Previous.Name }}...{{ .Tag.Name }}
+{{ end -}}
+{{ end -}}
+{{ end -}}
+```
+
+See the godoc [RenderData][doc-render-data] documentation for available variables.
+
+## Supported Styles
+
+| Name                                       | Status             | Features                                               |
+|:-------------------------------------------|:-------------------|:-------------------------------------------------------|
+| [GitHub](https://github.com/)              | :white_check_mark: | Mentions automatic link. Automatic link to references. |
+| [GitLab](https://about.gitlab.com/)        | :white_check_mark: | Mentions automatic link. Automatic link to references. |
+| [Bitbucket](https://bitbucket.org/product) | :white_check_mark: | Mentions automatic link. Automatic link to references. |
+
+> :memo: Even with styles that are not yet supported, it is possible to make
+ordinary CHANGELOG.
+
+## Jira Integration
+
+Jira is a popular project management tool. When a project uses Jira to track
+feature development and bug fixes, it may also want to generate change log based
+information stored in Jira. With embedding a Jira story id in git commit header,
+the git-chglog tool may automatically fetch data of the story from Jira, those
+data then can be used to render the template.
+
+Take the following steps to add Jira integration:
+
+### 1. Change the header parse pattern to recognize Jira issue id in the configure file
+
+__Where Jira issue is identical Jira story.__
+
+The following is a sample pattern:
+
+  ```yaml
+  header:
+    pattern: "^(?:(\\w*)|(?:\\[(.*)\\])?)\\:\\s(.*)$"
+    pattern_maps:
+      - Type
+      - JiraIssueID
+      - Subject
+  ```
+
+This sample pattern can match both forms of commit headers:
+
+- `feat: new feature of something`
+- `[JIRA-ID]: something`
+
+### 2. Add Jira configuration to the configure file
+
+The following is a sample:
+
+  ```yaml
+  jira:
+    info:
+      username: u
+      token: p
+      url: https://jira.com
+    issue:
+      type_maps:
+        Task: fix
+        Story: feat
+      description_pattern: "<changelog>(.*)</changelog>"
+  ```
+
+Here you need to define Jira URL, access username and token (password). If you
+don't want to write your Jira access credential in configure file, you may define
+them with environment variables: `JIRA_URL`, `JIRA_USERNAME` and `JIRA_TOKEN`.
+
+You also needs to define a issue type map. In above sample, Jira issue type `Task`
+will be mapped to `fix` and `Story` will be mapped to `feat`.
+
+As a Jira story's description could be very long, you might not want to include
+the entire description into change log. In that case, you may define `description_pattern`
+like above, so that only content embraced with `<changelog> ... </changelog>`
+will be included.
+
+### 3. Update the template to show Jira data
+
+In the template, if a commit contains a Jira issue id, then you may show Jira
+data. For example:
+
+```markdown
+{{ range .CommitGroups -}}
+### {{ .Title }}
+{{ range .Commits -}}
+- {{ if .Scope }}**{{ .Scope }}:** {{ end }}{{ .Subject }}
+{{ if .JiraIssue }} {{ .JiraIssue.Description }}
+{{ end }}
+{{ end }}
+{{ end -}}
+```
+
+Within a `Commit`, the following Jira data can be used in template:
+
+- `.JiraIssue.Summary` - Summary of the Jira story
+- `.JiraIssue.Description` - Description of the Jira story
+- `.JiraIssue.Type` - Original type of the Jira story, and `.Type` will be mapped type.
+- `.JiraIssue.Labels` - A list of strings, each is a Jira label.
+
+## FAQ
+
+<details>
+  <summary>Why do not you output files by default?</summary>
+  This is not for the purpose of completely automating the generation of CHANGELOG
+  files, it is only for assisting generation.
+
+  It is ideal to describe everything included in CHANGELOG in your commits. But
+  actually it is very difficult to do it perfectly.
+
+  There are times when you need to edit the generated output to write a great CHANGELOG.
+
+  By displaying it on the standard output, it makes it easy to change the contents.
+</details>
+
+<details>
+  <summary>Can I commit CHANGELOG changes before creating tags?</summary>
+
+  Yes, it can be solved by using the `--next-tag` flag.
+
+  For example, let's say you want to upgrade your project to `2.0.0`.
+  You can create CHANGELOG containing `2.0.0` as follows.
+
+  ```bash
+  git-chglog --next-tag 2.0.0 -o CHANGELOG.md
+  git commit -am "release 2.0.0"
+  git tag 2.0.0
+  ```
+
+  The point to notice is that before actually creating a tag with `git`, it is
+  conveying the next version with `--next-tag` :+1:
+
+  This is a step that is necessary for project operation in many cases.
+</details>
+
+<details>
+  <summary>Can I generate a CHANGELOG based on certain tags?</summary>
+
+  Yes, it can be solved by use the `--tag-filter-pattern` flag.
+
+  For example, the following command will only include tags starting with "v":
+
+  ```bash
+  git-chglog --tag-filter-pattern '^v'
+  ```
+
+</details>
+
+## TODO
+
+- [x] Windows Support
+- [x] More styles (GitHub, GitLab, Bitbucket :tada:)
+- [ ] Snippetization of configuration files (improvement of reusability)
+- [ ] More test test test ... (and example)
+
+## Thanks
+
+`git-chglog` is inspired by [conventional-changelog]. Thank you!
+
+## Contributing
+
+We always welcome your contributions :clap:
+
+## Development
+
+1. Use Golang version `>= 1.19`
+1. Fork (https://github.com/git-chglog/git-chglog) :tada:
+1. Create a feature branch :coffee:
+1. Run test suite with the `$ make test` command and confirm that it passes :zap:
+1. Run linters with the `$ make lint` command and confirm it passes :broom:
+   - The project uses [golangci-lint]
+1. Commit your changes :memo:
+1. Rebase your local changes against the `master` branch :bulb:
+1. Create new Pull Request :love_letter:
+
+Bugs, feature requests and comments are more than welcome in the [issues].
+
+## Release Process
+
+There is a `release` target within the Makefile that wraps up the steps to
+release a new version.
+
+> NOTE: Pass the `VERSION` variable when running the command to properly set
+> the tag version for the release.
+
+```bash
+$ VERSION=vX.Y.Z make release
+# EXAMPLE:
+$ VERSION=v0.11.3 make release
+```
+
+Once the `tag` has been pushed, the `goreleaser` github action will take care
+of the rest.
+
+## Feedback
+
+I would like to make `git-chglog` a better tool.
+The goal is to be able to use in various projects.
+
+Therefore, your feedback is very useful.
+I am very happy to tell you your opinions on Issues and PR :heart:
+
+## CHANGELOG
+
+See [CHANGELOG.md](./CHANGELOG.md)
+
+## Related Projects
+
+- [git-chglog/artwork] - Assets for `git-chglog`.
 
 ## License
 
-This project is licensed under the MIT License.
+[MIT © tsuyoshiwada](./LICENSE)
 
-Copyright (c) 2025 Govcraft
-
-## Sponsor
-
-If you find this project helpful, consider sponsoring the development!
-
-[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-%E2%9D%A4-%23db61a2?logo=GitHub)](https://github.com/sponsors/Govcraft)
+[releases page]: https://github.com/git-chglog/git-chglog/releases
+[Commit]: https://godoc.org/github.com/git-chglog/git-chglog#Commit
+[doc-commit]: https://godoc.org/github.com/git-chglog/git-chglog#Commit
+[doc-commit-group]: https://godoc.org/github.com/git-chglog/git-chglog#CommitGroup
+[doc-ref]: https://godoc.org/github.com/git-chglog/git-chglog#Ref
+[doc-render-data]: https://godoc.org/github.com/git-chglog/git-chglog#RenderData
+[conventional-changelog]: https://github.com/conventional-changelog/conventional-changelog
+[golangci-lint]: https://golangci-lint.run/usage/install/#local-installation
+[issues]: https://github.com/git-chglog/git-chglog/issues
+[git-chglog/artwork]: https://github.com/git-chglog/artwork
+[Sprig]: http://masterminds.github.io/sprig
