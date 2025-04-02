@@ -1,5 +1,5 @@
 use scraper::{Html, Selector};
-use std::{collections::HashMap, fs::{self, File, create_dir_all}, io::{Write}, path::{Path, PathBuf}}; // Removed BufRead, BufReader
+use std::{collections::HashMap, fs::{self, File, create_dir_all}, io::{Write}, path::{Path, PathBuf}, ffi::OsStr}; // Added OsStr
 use cargo::core::resolver::features::{CliFeatures};
 // use cargo::core::SourceId; // Removed unused import
 // use cargo::util::Filesystem; // Removed unused import
@@ -37,19 +37,18 @@ pub struct Document {
 
 
 /// Generates documentation for a given crate in a temporary directory,
-/// then loads and parses the HTML documents.
-/// Extracts text content from the main content area of rustdoc generated HTML.
+/// then loads and parses the HTML and Markdown documents.
+/// Extracts text content from the main content area of rustdoc generated HTML,
+/// and uses raw content for Markdown files.
 pub fn load_documents(
     crate_name: &str,
     crate_version_req: &str,
     features: Option<&Vec<String>>, // Add optional features parameter
 ) -> Result<Vec<Document>, DocLoaderError> {
-    let mut documents = Vec::new();
-
+    // --- Setup Temporary Environment ---
     let temp_dir = tempdir().map_err(DocLoaderError::TempDirCreationFailed)?;
     let temp_dir_path = temp_dir.path();
     let temp_manifest_path = temp_dir_path.join("Cargo.toml");
-
 
     // Create a temporary Cargo.toml using the version requirement and features
     let features_string = features
@@ -83,7 +82,7 @@ edition = "2021"
     temp_manifest_file.write_all(cargo_toml_content.as_bytes())?;
 
 
-    // --- Use Cargo API ---
+    // --- Use Cargo API to Generate Docs ---
     let mut config = GlobalContext::default()?; // Make mutable
     // Configure context (set quiet to false for more detailed errors)
     config.configure(
@@ -122,31 +121,41 @@ edition = "2021"
     ops::doc(&ws, &doc_opts).map_err(DocLoaderError::CargoLib)?; // Use ws
     // --- End Cargo API ---
 
+    // --- Find and Process Generated Docs ---
     let base_doc_path = temp_dir_path.join("doc");
     let docs_path = find_documentation_path(&base_doc_path, crate_name)?;
 
     eprintln!("Using documentation path: {}", docs_path.display()); // Log the path we are actually using
 
+    // Call the refactored processing function
+    process_documentation_directory(&docs_path)
+}
+
+/// Processes files within a documentation directory, extracting content from HTML and MD files.
+fn process_documentation_directory(docs_path: &Path) -> Result<Vec<Document>, DocLoaderError> {
+    let mut documents = Vec::new();
     // Define the CSS selector for the main content area in rustdoc HTML
     // This might need adjustment based on the exact rustdoc version/theme
     let content_selector = Selector::parse("section#main-content.content")
         .map_err(|e| DocLoaderError::Selector(e.to_string()))?;
 
-    // --- Collect all HTML file paths first ---
-    let all_html_paths: Vec<PathBuf> = WalkDir::new(&docs_path)
+    // --- Collect all relevant HTML and MD file paths first ---
+    let relevant_files: Vec<PathBuf> = WalkDir::new(docs_path)
         .into_iter()
         .filter_map(Result::ok) // Ignore errors during iteration
         .filter(|e| {
-            !e.file_type().is_dir() && e.path().extension().is_some_and(|ext| ext == "html")
+            if e.file_type().is_dir() { return false; }
+            // Check if the extension is either "html" or "md"
+            e.path().extension().map_or(false, |ext| ext == "html" || ext == "md")
         })
         .map(|e| e.into_path()) // Get the PathBuf
         .collect();
 
-    eprintln!("[DEBUG] Found {} total HTML files initially.", all_html_paths.len());
+    eprintln!("[DEBUG] Found {} total HTML/MD files initially.", relevant_files.len());
 
-    // --- Group files by basename ---
+    // --- Group files by basename to handle duplicates (primarily for HTML) ---
     let mut basename_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    for path in all_html_paths {
+    for path in relevant_files { // Use the combined list
         if let Some(filename_osstr) = path.file_name() {
             if let Some(filename_str) = filename_osstr.to_str() {
                 basename_groups
@@ -162,35 +171,47 @@ edition = "2021"
     }
 
     // --- Initialize paths_to_process and explicitly add the root index.html if it exists ---
+    // This ensures the main crate page is always included if present.
     let mut paths_to_process: Vec<PathBuf> = Vec::new();
     let root_index_path = docs_path.join("index.html");
     if root_index_path.is_file() {
         paths_to_process.push(root_index_path);
     }
+    // Also check for a root README.md
+    let root_readme_path = docs_path.join("README.md");
+     if root_readme_path.is_file() && !paths_to_process.contains(&root_readme_path) { // Avoid adding if index.html was README.md (unlikely)
+         paths_to_process.push(root_readme_path);
+     }
 
-    // --- Filter based on duplicates and size ---
-    // NOTE: Initialization of paths_to_process moved before this loop
+
+    // --- Filter based on duplicates (keep largest HTML) and ignore source view ---
     for (basename, mut paths) in basename_groups {
-        // Always ignore index.html at this stage (except the root one added earlier)
-        if basename == "index.html" {
+        // Always ignore index.html and README.md at this stage, as the root ones were handled above.
+        // This prevents including module index pages or nested readmes multiple times if they share names.
+        if basename == "index.html" || basename == "README.md" {
             continue;
         }
 
-        // Also ignore files within source code view directories
+        // Also ignore files within source code view directories (e.g., `doc/src/...`)
         // Check the first path (they should share the problematic component if any)
-        if paths.first().map_or(false, |p| p.components().any(|comp| comp.as_os_str() == "src")) {
+        if paths.first().map_or(false, |p| p.components().any(|comp| comp.as_os_str() == OsStr::new("src"))) {
+             eprintln!("[DEBUG] Ignoring file in src view: {}", paths.first().unwrap().display());
              continue;
         }
 
 
         if paths.len() == 1 {
-            // Single file with this basename (and not index.html), keep it
+            // Single file with this basename (and not index.html/README.md), keep it
             paths_to_process.push(paths.remove(0));
         } else {
-            // Multiple files with the same basename (duplicates)
-            // Find the largest one by file size
+            // Multiple files with the same basename (likely HTML duplicates)
+            // Find the largest one by file size - typically the main definition page vs. re-exports.
             // Explicit type annotation needed for the error type in try_fold
             let largest_path_result: Result<Option<(PathBuf, u64)>, std::io::Error> = paths.into_iter().try_fold(None::<(PathBuf, u64)>, |largest, current| {
+                // Only consider HTML files for size comparison duplicate resolution
+                if current.extension().map_or(false, |ext| ext != "html") {
+                    return Ok(largest); // Skip non-HTML files in this check
+                }
                 let current_meta = fs::metadata(&current)?;
                 let current_size = current_meta.len();
                 match largest {
@@ -211,67 +232,83 @@ edition = "2021"
                     paths_to_process.push(p);
                 }
                 Ok(None) => {
-                     // This case should ideally not happen if the input `paths` was not empty,
-                     // but handle it defensively.
-                     eprintln!("[WARN] No files found for basename '{}' during size comparison.", basename);
+                     // This case might happen if all duplicates were non-HTML
+                     eprintln!("[WARN] No HTML files found for basename '{}' during size comparison, or group was empty.", basename);
                 }
                 Err(e) => {
-                    eprintln!("[WARN] Error getting metadata for basename '{}', skipping: {}", basename, e);
-                    // Decide if you want to skip the whole group or handle differently
+                    eprintln!("[WARN] Error getting metadata for basename '{}', skipping group: {}", basename, e);
+                    // Skip the whole group if metadata fails
                 }
             }
         }
     }
 
-     eprintln!("[DEBUG] Filtered down to {} files to process.", paths_to_process.len());
+     eprintln!("[DEBUG] Filtered down to {} unique files/paths to process.", paths_to_process.len());
 
 
     // --- Process the filtered list of files ---
     for path in paths_to_process {
-        // Calculate path relative to the docs_path root
-        let relative_path = match path.strip_prefix(&docs_path) {
+        // Calculate path relative to the docs_path root for storing in Document
+        let relative_path = match path.strip_prefix(docs_path) {
              Ok(p) => p.to_path_buf(),
-             Err(e) => {
+            Err(e) => {
                  eprintln!("[WARN] Failed to strip prefix {} from {}: {}", docs_path.display(), path.display(), e);
                  continue; // Skip if path manipulation fails
              }
         };
         let path_str = relative_path.to_string_lossy().to_string();
 
-        let html_content = match fs::read_to_string(&path) { // Read from the absolute path
-             Ok(content) => content,
-             Err(e) => {
-                 eprintln!("[WARN] Failed to read file {}: {}", path.display(), e);
-                 continue; // Skip this file if reading fails
-             }
+        let file_content = match fs::read_to_string(&path) { // Read from the absolute path
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("[WARN] Failed to read file {}: {}", path.display(), e);
+                continue; // Skip this file if reading fails
+            }
         };
 
-        let document = Html::parse_document(&html_content);
+        // Check file extension to decide processing method
+        if path.extension().map_or(false, |ext| ext == "html") {
+            // Process HTML using scraper
+            let html_document = Html::parse_document(&file_content);
+            if let Some(main_content_element) = html_document.select(&content_selector).next() {
+                let text_content: String = main_content_element
+                    .text()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
 
-        if let Some(main_content_element) = document.select(&content_selector).next() {
-            let text_content: String = main_content_element
-                .text()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<&str>>()
-                .join("\n");
-
-            if !text_content.is_empty() {
+                if !text_content.is_empty() {
+                    documents.push(Document {
+                        path: path_str,
+                        content: text_content,
+                    });
+                } else {
+                     // eprintln!("[DEBUG] No text content found in main section for HTML: {}", path.display());
+                }
+            } else {
+                 // eprintln!("[DEBUG] 'main-content' selector not found for HTML: {}", path.display());
+            }
+        } else if path.extension().map_or(false, |ext| ext == "md") {
+            // Process Markdown: Use raw content
+            if !file_content.trim().is_empty() {
                 documents.push(Document {
                     path: path_str,
-                    content: text_content,
+                    content: file_content, // Store the raw Markdown content
                 });
             } else {
-                 // eprintln!("[DEBUG] No text content found in main section for: {}", path.display());
+                 eprintln!("[DEBUG] Skipping empty Markdown file: {}", path.display());
             }
         } else {
-             // eprintln!("[DEBUG] 'main-content' selector not found for: {}", path.display());
+            // Should not happen due to WalkDir filter, but handle defensively
+            eprintln!("[WARN] Skipping file with unexpected extension: {}", path.display());
         }
     }
 
     eprintln!("Finished document loading. Found {} final documents.", documents.len());
     Ok(documents)
 }
+
 
 /// Finds the correct documentation directory for a specific crate within a base 'doc' directory.
 ///
@@ -361,9 +398,10 @@ fn find_documentation_path(base_doc_path: &Path, crate_name: &str) -> Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::fs::{self, File};
     use std::io::Write;
     use tempfile::tempdir;
+    use std::path::Path; // Add Path import
 
     // Helper to create dummy doc structure including index.html content
     fn setup_test_dir_with_titles(base: &Path, dirs: &[(&str, Option<&str>)]) -> std::io::Result<()> {
@@ -389,6 +427,42 @@ mod tests {
             //     // File::create(search_index_path)?;
             // }
         }
+        Ok(())
+    }
+
+    // Helper to create a mock documentation directory with HTML and MD files
+    fn setup_mock_docs(base_path: &Path) -> std::io::Result<()> {
+        // Root index.html (should be processed)
+        let mut index_file = File::create(base_path.join("index.html"))?;
+        writeln!(index_file, "<!DOCTYPE html><html><head><title>Root Crate - Rust</title></head><body><section id='main-content' class='content'>Root Index Content</section></body></html>")?;
+
+        // A regular HTML file (should be processed)
+        let mod_path = base_path.join("module");
+        fs::create_dir_all(&mod_path)?;
+        let mut mod_file = File::create(mod_path.join("struct.MyStruct.html"))?;
+        writeln!(mod_file, "<!DOCTYPE html><html><head><title>MyStruct - Rust</title></head><body><section id='main-content' class='content'>MyStruct Content Larger</section></body></html>")?; // Make slightly larger
+
+        // A Markdown file (should be processed, raw content)
+        let mut md_file = File::create(base_path.join("README.md"))?;
+        writeln!(md_file, "# Project Readme\n\nThis is the content.")?;
+
+        // An HTML file inside a 'src' directory (should be ignored)
+        let src_view_path = base_path.join("src").join("my_crate");
+        fs::create_dir_all(&src_view_path)?;
+        let mut src_html_file = File::create(src_view_path.join("lib.rs.html"))?;
+        writeln!(src_html_file, "<html><body>Source Code View</body></html>")?;
+
+        // A duplicate HTML file (only largest should be kept - module one is larger)
+        // Create a smaller duplicate in another dir
+        let dup_dir = base_path.join("duplicate");
+        fs::create_dir_all(&dup_dir)?;
+        let mut dup_file = File::create(dup_dir.join("struct.MyStruct.html"))?;
+        writeln!(dup_file, "<html><body>Smaller Duplicate Content</body></html>")?; // Smaller content
+
+         // Another Markdown file in a subdirectory
+        let mut sub_md_file = File::create(mod_path.join("GUIDE.md"))?;
+        writeln!(sub_md_file, "## Guide\n\nMore details here.")?;
+
         Ok(())
     }
 
@@ -519,6 +593,54 @@ mod tests {
 
         let result = find_documentation_path(base_path, "clap")?;
         assert_eq!(result, base_path.join("clap"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_documentation_directory_includes_md() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let docs_path = temp.path();
+        setup_mock_docs(docs_path)?;
+
+        let documents = process_documentation_directory(docs_path)?;
+
+        assert_eq!(documents.len(), 4, "Should find root index.html, MyStruct.html, README.md, and GUIDE.md");
+
+        // Check for specific documents (order might vary)
+        let mut found_index = false;
+        let mut found_struct = false;
+        let mut found_readme = false;
+        let mut found_guide = false;
+
+        for doc in &documents {
+             eprintln!("Found doc: path='{}', content='{}'", doc.path, doc.content.chars().take(50).collect::<String>()); // Debug print
+            if doc.path == "index.html" {
+                assert!(doc.content.contains("Root Index Content"));
+                found_index = true;
+            } else if doc.path == "module/struct.MyStruct.html" { // Path relative to docs_path
+                assert!(doc.content.contains("MyStruct Content Larger")); // Check content of the larger one
+                found_struct = true;
+            } else if doc.path == "README.md" {
+                assert!(doc.content.contains("# Project Readme"));
+                assert!(doc.content.contains("This is the content."));
+                found_readme = true;
+            } else if doc.path == "module/GUIDE.md" { // Path relative to docs_path
+                 assert!(doc.content.contains("## Guide"));
+                 assert!(doc.content.contains("More details here."));
+                 found_guide = true;
+            }
+        }
+
+        assert!(found_index, "Root index.html content not found or incorrect");
+        assert!(found_struct, "MyStruct.html content not found or incorrect");
+        assert!(found_readme, "README.md content not found or incorrect");
+        assert!(found_guide, "module/GUIDE.md content not found or incorrect");
+
+        // Verify ignored files are not present
+        assert!(!documents.iter().any(|d| d.path.contains("src/")), "Should ignore files in 'src/' directories");
+        // Check that the smaller duplicate wasn't included
+        assert!(!documents.iter().any(|d| d.path == "duplicate/struct.MyStruct.html"), "Smaller duplicate should be ignored");
+
         Ok(())
     }
 
