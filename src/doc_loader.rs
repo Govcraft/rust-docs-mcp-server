@@ -273,6 +273,7 @@ fn process_documentation_directory(docs_path: &Path) -> Result<Vec<Document>, Do
         if extension == Some("md") {
             // Process Markdown: Use raw content
             if !file_content.trim().is_empty() {
+                eprintln!("[INFO] Including Markdown document: {}", path_str); // Moved log here
                 documents.push(Document {
                     path: path_str,
                     content: file_content, // Store the raw Markdown content
@@ -284,12 +285,14 @@ fn process_documentation_directory(docs_path: &Path) -> Result<Vec<Document>, Do
             if let Some(main_content_element) = html_document.select(&content_selector).next() {
                 let text_content: String = main_content_element
                     .text()
+
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<&str>>()
                     .join("\n");
 
                 if !text_content.is_empty() {
+                    eprintln!("[INFO] Including Rust source document (raw): {}", path_str); // Moved log here
                     documents.push(Document {
                         path: path_str,
                         content: text_content,
@@ -312,6 +315,7 @@ fn process_documentation_directory(docs_path: &Path) -> Result<Vec<Document>, Do
                     .join("\n");
 
                 if !text_content.is_empty() {
+                    eprintln!("[INFO] Including HTML document (extracted): {}", path_str); // Moved log here
                     documents.push(Document {
                         path: path_str,
                         content: text_content,
