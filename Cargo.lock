@@ -3865,6 +3865,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "ndarray",
+ "regex",
  "rmcp",
  "schemars",
  "scraper",

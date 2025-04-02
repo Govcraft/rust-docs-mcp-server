@@ -24,6 +24,7 @@ tempfile = "3.19.1"
 anyhow = "1.0.97"
 schemars = "0.8.22"
 clap = { version = "4.5.34", features = ["cargo", "derive", "env"] }
+regex = "1.11.1"
 
 
 # --- Platform Specific Dependencies ---

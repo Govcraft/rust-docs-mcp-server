@@ -1,6 +1,6 @@
 use scraper::{Html, Selector};
-use std::{collections::HashMap, fs::{self, File, create_dir_all}, io::Write, path::PathBuf}; // Added PathBuf, HashMap
-use cargo::core::resolver::features::CliFeatures;
+use std::{collections::HashMap, fs::{self, File, create_dir_all}, io::{Write}, path::{Path, PathBuf}}; // Removed BufRead, BufReader
+use cargo::core::resolver::features::{CliFeatures};
 // use cargo::core::SourceId; // Removed unused import
 // use cargo::util::Filesystem; // Removed unused import
 
@@ -122,48 +122,8 @@ edition = "2021"
     ops::doc(&ws, &doc_opts).map_err(DocLoaderError::CargoLib)?; // Use ws
     // --- End Cargo API ---
 
-    // --- Find the actual documentation directory ---
-    // Iterate through subdirectories in `target/doc` and find the one containing `index.html`.
     let base_doc_path = temp_dir_path.join("doc");
-
-    let mut target_docs_path: Option<PathBuf> = None;
-    let mut found_count = 0;
-
-    if base_doc_path.is_dir() {
-        for entry_result in fs::read_dir(&base_doc_path)? {
-            let entry = entry_result?;
-            if entry.file_type()?.is_dir() {
-                let dir_path = entry.path();
-                let index_html_path = dir_path.join("index.html");
-                if index_html_path.is_file() {
-                    if target_docs_path.is_none() {
-                        target_docs_path = Some(dir_path);
-                    }
-                    found_count += 1;
-                } else {
-                }
-            }
-        }
-    }
-
-    let docs_path = match (found_count, target_docs_path) {
-        (1, Some(path)) => {
-            path
-        },
-        (0, _) => {
-            return Err(DocLoaderError::CargoLib(anyhow::anyhow!(
-                "Could not find any subdirectory containing index.html within '{}'. Cargo doc might have failed or produced unexpected output.",
-                base_doc_path.display()
-            )));
-        },
-        (count, _) => {
-             return Err(DocLoaderError::CargoLib(anyhow::anyhow!(
-                "Expected exactly one subdirectory containing index.html within '{}', but found {}. Cannot determine the correct documentation path.",
-                base_doc_path.display(), count
-            )));
-        }
-    };
-    // --- End finding documentation directory ---
+    let docs_path = find_documentation_path(&base_doc_path, crate_name)?;
 
     eprintln!("Using documentation path: {}", docs_path.display()); // Log the path we are actually using
 
@@ -201,7 +161,7 @@ edition = "2021"
         }
     }
 
-    // --- Initialize paths_to_process and explicitly add the root index.html if it exists --- 
+    // --- Initialize paths_to_process and explicitly add the root index.html if it exists ---
     let mut paths_to_process: Vec<PathBuf> = Vec::new();
     let root_index_path = docs_path.join("index.html");
     if root_index_path.is_file() {
@@ -311,4 +271,255 @@ edition = "2021"
 
     eprintln!("Finished document loading. Found {} final documents.", documents.len());
     Ok(documents)
+}
+
+/// Finds the correct documentation directory for a specific crate within a base 'doc' directory.
+///
+/// Handles cases where multiple subdirectories might exist (e.g., due to dependencies)
+/// or where the directory name doesn't exactly match the crate name (hyphens vs underscores, renames).
+fn find_documentation_path(base_doc_path: &Path, crate_name: &str) -> Result<PathBuf, DocLoaderError> {
+    let mut candidate_doc_paths: Vec<PathBuf> = Vec::new();
+
+    if base_doc_path.is_dir() {
+        for entry_result in fs::read_dir(base_doc_path)? {
+            let entry = entry_result?;
+            if entry.file_type()?.is_dir() {
+                let dir_path = entry.path();
+                // Check if index.html exists within the subdirectory
+                if dir_path.join("index.html").is_file() {
+                    candidate_doc_paths.push(dir_path);
+                }
+            }
+        }
+    }
+
+    match candidate_doc_paths.len() {
+        0 => Err(DocLoaderError::CargoLib(anyhow::anyhow!(
+            "Could not find any subdirectory containing index.html within '{}'. Cargo doc might have failed or produced unexpected output.",
+            base_doc_path.display()
+        ))),
+        1 => Ok(candidate_doc_paths.remove(0)), // Exactly one candidate, assume it's correct
+        _ => {
+            // Multiple candidates, try to disambiguate
+            let mut matched_path: Option<PathBuf> = None;
+            let normalized_input_crate_name = crate_name.replace('-', "_");
+
+            // Prepare scraper selector for title tag
+            let title_selector = Selector::parse("html > head > title")
+                .map_err(|e| DocLoaderError::Selector(format!("Failed to parse title selector: {}", e)))?;
+
+            for candidate_path in candidate_doc_paths {
+                // 1. Check index.html's title tag
+                let index_html_path = candidate_path.join("index.html");
+                let mut found_match_in_file = false;
+                if index_html_path.is_file() {
+                    if let Ok(html_content) = fs::read_to_string(&index_html_path) {
+                        let document = Html::parse_document(&html_content);
+                        if let Some(title_element) = document.select(&title_selector).next() {
+                            let title_text = title_element.text().collect::<String>();
+                            // Normalize the extracted title part for comparison
+                            let normalized_title_crate_part = title_text
+                                .split(" - Rust") // Split at " - Rust"
+                                .next()          // Take the first part
+                                .unwrap_or("")   // Handle cases where " - Rust" isn't present
+                                .trim()          // Trim whitespace
+                                .replace('-', "_"); // Normalize hyphens
+
+                            if normalized_title_crate_part == normalized_input_crate_name {
+                                found_match_in_file = true;
+                            }
+                        }
+                    } else {
+                        eprintln!("[WARN] Failed to read index.html at '{}'", index_html_path.display());
+                    }
+                }
+
+                // 2. If matched via title, track it
+                if found_match_in_file {
+                    if matched_path.is_some() {
+                        // Found a second match! Ambiguous.
+                        return Err(DocLoaderError::CargoLib(anyhow::anyhow!(
+                            "Found multiple documentation directories matching crate name '{}' based on index.html title within '{}' (e.g., '{}' and '{}'). Cannot determine the correct path.",
+                            crate_name, base_doc_path.display(), matched_path.unwrap().display(), candidate_path.display()
+                        )));
+                    }
+                    matched_path = Some(candidate_path);
+                }
+            }
+
+            // 3. Return the unique match or error
+            matched_path.ok_or_else(|| DocLoaderError::CargoLib(anyhow::anyhow!(
+                "Found multiple candidate documentation directories within '{}', but none could be uniquely identified as matching crate '{}' using the index.html title.",
+                base_doc_path.display(), crate_name
+
+
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    // Helper to create dummy doc structure including index.html content
+    fn setup_test_dir_with_titles(base: &Path, dirs: &[(&str, Option<&str>)]) -> std::io::Result<()> {
+        for (name, title_content) in dirs {
+            let dir_path = base.join(name);
+            fs::create_dir_all(&dir_path)?; // Use create_dir_all
+
+            if let Some(title) = title_content {
+                // Create index.html with the specified title
+                let index_path = dir_path.join("index.html");
+                let mut index_file = File::create(index_path)?;
+                // Basic HTML structure with the title
+                writeln!(index_file, "<!DOCTYPE html><html><head><title>{}</title></head><body>Content</body></html>", title)?;
+            } else {
+                // Create an empty index.html if no title specified (or handle differently if needed)
+                 File::create(dir_path.join("index.html"))?;
+            }
+
+            // Optionally create search-index.js if needed for other tests, but not used for title check
+            // let search_index_path = dir_path.join("search-index.js");
+            // if fs::metadata(&search_index_path).is_err() { // Avoid overwriting if exists
+            //     // Example: Create a dummy search-index.js if required by other logic
+            //     // File::create(search_index_path)?;
+            // }
+        }
+        Ok(())
+    }
+
+
+    #[test]
+    fn test_find_docs_no_dirs() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        let result = find_documentation_path(base_path, "my_crate");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Could not find any subdirectory"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_docs_one_dir_correct() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        setup_test_dir_with_titles(base_path, &[("my_crate", Some("my_crate - Rust"))])?;
+        let result = find_documentation_path(base_path, "my_crate")?;
+        assert_eq!(result, base_path.join("my_crate"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_docs_one_dir_wrong_name() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        setup_test_dir_with_titles(base_path, &[("other_crate", Some("other_crate - Rust"))])?;
+        let result = find_documentation_path(base_path, "my_crate")?;
+        // If only one dir exists, we assume it's the right one, even if name doesn't match
+        assert_eq!(result, base_path.join("other_crate"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_docs_multiple_dirs_disambiguate_ok() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        setup_test_dir_with_titles(base_path, &[
+            ("dep_crate", Some("dep_crate - Rust")),
+            ("my_crate", Some("my_crate - Rust")), // Correct title
+        ])?;
+        let result = find_documentation_path(base_path, "my_crate")?;
+        assert_eq!(result, base_path.join("my_crate"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_docs_multiple_dirs_hyphen_ok() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        setup_test_dir_with_titles(base_path, &[
+            ("dep_crate", Some("dep_crate - Rust")),
+            // Crate name has hyphen, title might use underscore or hyphen
+            ("my_crate_docs", Some("my_crate - Rust")), // Title uses underscore matching normalized name
+        ])?;
+        let result = find_documentation_path(base_path, "my-crate")?; // Input has hyphen
+        assert_eq!(result, base_path.join("my_crate_docs"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_docs_multiple_dirs_no_match() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        setup_test_dir_with_titles(base_path, &[
+            ("dep_crate", Some("dep_crate - Rust")),
+            ("another_dep", Some("another_dep - Rust")),
+        ])?;
+        let result = find_documentation_path(base_path, "my_crate");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("none could be uniquely identified"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_docs_multiple_dirs_ambiguous_match() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        setup_test_dir_with_titles(base_path, &[
+            ("my_crate_v1", Some("my_crate - Rust")), // Matches normalized "my_crate"
+            ("my_crate_v2", Some("my_crate - Rust")), // Also matches normalized "my_crate"
+        ])?;
+        let result = find_documentation_path(base_path, "my_crate");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Found multiple documentation directories matching"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_docs_multiple_dirs_missing_index_html() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+         // Create dirs but only one with index.html
+        fs::create_dir_all(base_path.join("dep_crate"))?;
+        setup_test_dir_with_titles(base_path, &[("my_crate", Some("my_crate - Rust"))])?;
+
+        let result = find_documentation_path(base_path, "my_crate")?;
+        // Should still find the correct one as the other is not a candidate
+        assert_eq!(result, base_path.join("my_crate"));
+        Ok(())
+    }
+
+     #[test]
+    fn test_find_docs_multiple_dirs_malformed_title() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        setup_test_dir_with_titles(base_path, &[
+            ("dep_crate", Some("Completely Wrong Title Format")), // Malformed title
+            ("my_crate", Some("my_crate - Rust")),
+        ])?;
+        let result = find_documentation_path(base_path, "my_crate")?;
+        // Should ignore malformed and find correct one
+        assert_eq!(result, base_path.join("my_crate"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_docs_multiple_dirs_disambiguate_by_title() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let base_path = temp.path();
+        // Simulate missing search-index.js but correct title in index.html
+        setup_test_dir_with_titles(base_path, &[
+            ("stdio_fixture", Some("stdio_fixture - Rust")),
+            ("clap", Some("clap - Rust")),
+        ])?;
+
+        let result = find_documentation_path(base_path, "clap")?;
+        assert_eq!(result, base_path.join("clap"));
+        Ok(())
+    }
+
 }
