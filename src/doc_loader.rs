@@ -192,12 +192,12 @@ fn process_documentation_directory(docs_path: &Path) -> Result<Vec<Document>, Do
             continue;
         }
 
-        // Also ignore files within source code view directories (e.g., `doc/src/...`)
-        // Check the first path (they should share the problematic component if any)
-        if paths.first().map_or(false, |p| p.components().any(|comp| comp.as_os_str() == OsStr::new("src"))) {
-             eprintln!("[DEBUG] Ignoring file in src view: {}", paths.first().unwrap().display());
-             continue;
-        }
+        // // Also ignore files within source code view directories (e.g., `doc/src/...`) // Commented out to include source files
+        // // Check the first path (they should share the problematic component if any)
+        // if paths.first().map_or(false, |p| p.components().any(|comp| comp.as_os_str() == OsStr::new("src"))) {
+        //      eprintln!("[DEBUG] Ignoring file in src view: {}", paths.first().unwrap().display());
+        //      continue;
+        // }
 
 
         if paths.len() == 1 {
