@@ -267,8 +267,19 @@ fn process_documentation_directory(docs_path: &Path) -> Result<Vec<Document>, Do
         };
 
         // Check file extension to decide processing method
-        if path.extension().map_or(false, |ext| ext == "html") {
-            // Process HTML using scraper
+        let extension = path.extension().and_then(OsStr::to_str);
+        let path_str_for_check = path.to_string_lossy(); // For checking substrings
+
+        if extension == Some("md") {
+            // Process Markdown: Use raw content
+            if !file_content.trim().is_empty() {
+                documents.push(Document {
+                    path: path_str,
+                    content: file_content, // Store the raw Markdown content
+                });
+            }
+        } else if path_str_for_check.ends_with(".rs.html") { // Check for rust source files specifically
+             // Process Rust source HTML view: Use raw content (like Markdown)
             let html_document = Html::parse_document(&file_content);
             if let Some(main_content_element) = html_document.select(&content_selector).next() {
                 let text_content: String = main_content_element
@@ -289,19 +300,31 @@ fn process_documentation_directory(docs_path: &Path) -> Result<Vec<Document>, Do
             } else {
                  // eprintln!("[DEBUG] 'main-content' selector not found for HTML: {}", path.display());
             }
-        } else if path.extension().map_or(false, |ext| ext == "md") {
-            // Process Markdown: Use raw content
-            if !file_content.trim().is_empty() {
-                documents.push(Document {
-                    path: path_str,
-                    content: file_content, // Store the raw Markdown content
-                });
+        } else if extension == Some("html") { // Process other HTML using scraper
+            // Process regular HTML using scraper
+            let html_document = Html::parse_document(&file_content);
+            if let Some(main_content_element) = html_document.select(&content_selector).next() {
+                let text_content: String = main_content_element
+                    .text()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
+
+                if !text_content.is_empty() {
+                    documents.push(Document {
+                        path: path_str,
+                        content: text_content,
+                    });
+                } else {
+                     // eprintln!("[DEBUG] No text content found in main section for HTML: {}", path.display());
+                }
             } else {
-                 eprintln!("[DEBUG] Skipping empty Markdown file: {}", path.display());
+                 // eprintln!("[DEBUG] 'main-content' selector not found for HTML: {}", path.display());
             }
         } else {
-            // Should not happen due to WalkDir filter, but handle defensively
-            eprintln!("[WARN] Skipping file with unexpected extension: {}", path.display());
+             // Should not happen due to WalkDir filter, but handle defensively
+             eprintln!("[WARN] Skipping file with unexpected extension: {}", path.display());
         }
     }
 
