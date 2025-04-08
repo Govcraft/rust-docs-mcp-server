@@ -29,6 +29,14 @@
           system,
           ...
         }:
+        let
+          pkgs = import inputs.nixpkgs {
+            inherit system;
+            config = {
+              allowUnfree = true;
+            };
+          };
+        in
         {
 
           # Golang Development Environment Options
@@ -56,8 +64,12 @@
             rustVersion = "stable";
             # Example configuration:
             # withTools = [ ];  # Will be prefixed with cargo-
-            extraPackages = [ pkgs.openssl pkgs.openssl.dev pkgs.pkg-config ]; # Add openssl libs, dev libs, and pkg-config
-            # ide.type = "none";
+            extraPackages = [
+              pkgs.openssl
+              pkgs.openssl.dev
+              pkgs.pkg-config
+            ]; # Add openssl libs, dev libs, and pkg-config
+            #ide.type = "vscode";
           };
 
           # Node.js Development Environment Options
@@ -69,11 +81,11 @@
           # ide.type: enum - IDE preference ("vscode", "webstorm", "none") (default: "none")
           node-dev = {
             # Example configuration:
-            # enable = true;
+            enable = true;
             # nodeVersion = "20";
             # withTools = [ "typescript" "yarn" "pnpm" ];
             # extraPackages = [ ];
-            # ide.type = "none";
+            ide.type = "vscode";
           };
 
           typst-dev = {

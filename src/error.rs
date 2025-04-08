@@ -21,7 +21,7 @@ pub enum ServerError {
     #[error("JSON Error: {0}")]
     Json(#[from] serde_json::Error), // Add error for JSON deserialization
     #[error("Tiktoken Error: {0}")]
-    Tiktoken(String),
+    Tiktoken(String), // Revert to String, no #[from]
     #[error("XDG Directory Error: {0}")]
     Xdg(String),
     #[error("MCP Runtime Error: {0}")]

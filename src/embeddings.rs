@@ -1,145 +1,169 @@
-use crate::{doc_loader::Document, error::ServerError};
+// Keep necessary imports, remove duplicates later
+use crate::doc_loader::DocumentChunk; // Use DocumentChunk
+use crate::error::ServerError;
 use async_openai::{
-    config::OpenAIConfig, error::ApiError as OpenAIAPIErr, types::CreateEmbeddingRequestArgs,
+    config::OpenAIConfig,
+    // error::ApiError as OpenAIAPIErr, // Unused
+    // types::{CreateEmbeddingRequestArgs}, // Unused
     Client as OpenAIClient,
 };
-use ndarray::{Array1, ArrayView1};
-use std::sync::OnceLock;
-use std::sync::Arc;
+use bincode::{Decode, Encode}; // Used in derive
+use futures::stream::{self, StreamExt, TryStreamExt};
+use ndarray::ArrayView1; // Keep ArrayView1
+use serde::{Deserialize, Serialize}; // Keep serde imports for the struct derive
+use std::sync::{Arc, OnceLock}; // Combine Arc and OnceLock import
 use tiktoken_rs::cl100k_base;
-use futures::stream::{self, StreamExt};
 
-// Static OnceLock for the OpenAI client
+// Define the OpenAI client static variable ONCE
 pub static OPENAI_CLIENT: OnceLock<OpenAIClient<OpenAIConfig>> = OnceLock::new();
 
 
-use bincode::{Encode, Decode};
-use serde::{Serialize, Deserialize};
+// Remove duplicate imports (lines 16-27 were duplicates)
 
-// Define a struct containing path, content, and embedding for caching
-#[derive(Serialize, Deserialize, Debug, Encode, Decode)]
-pub struct CachedDocumentEmbedding {
-    pub path: String,
-    pub content: String, // Add the extracted document content
+/// Represents a pre-computed embedding for a single documentation chunk, ready for caching.
+// Add Encode and Decode back, needed for caching
+#[derive(Serialize, Deserialize, Debug, Clone, Encode, Decode)]
+pub struct CachedChunkEmbedding {
+    /// Relative path of the original source file (e.g., "struct.MyStruct.html").
+    pub source_path: String,
+    /// The 0-based index of this chunk within its original source file.
+    pub chunk_index: usize,
+    /// The actual text content of this chunk. Stored for context retrieval.
+    pub content: String,
+    /// The embedding vector for this chunk's content. Store as Vec<f32> for easier serialization.
     pub vector: Vec<f32>,
 }
 
+// --- Constants ---
+const CONCURRENCY_LIMIT: usize = 10; // Max concurrent OpenAI requests
+const TOKEN_LIMIT: usize = 8191; // Max tokens for text-embedding-3-small
+const EMBEDDING_MODEL: &str = "text-embedding-3-small"; // Define model constant
 
-/// Calculates the cosine similarity between two vectors.
-pub fn cosine_similarity(v1: ArrayView1<f32>, v2: ArrayView1<f32>) -> f32 {
-    let dot_product = v1.dot(&v2);
-    let norm_v1 = v1.dot(&v1).sqrt();
-    let norm_v2 = v2.dot(&v2).sqrt();
+// Remove duplicate static definition (lines 48-50)
 
-    if norm_v1 == 0.0 || norm_v2 == 0.0 {
-        0.0
-    } else {
-        dot_product / (norm_v1 * norm_v2)
-    }
-}
+// --- Embedding Generation ---
 
-/// Generates embeddings for a list of documents using the OpenAI API.
+/// Generates embeddings for a list of document chunks using the OpenAI API.
+///
+/// Skips chunks whose content exceeds the `TOKEN_LIMIT`.
+/// Returns a vector of successfully generated `CachedChunkEmbedding`s.
+// Keep only one definition of generate_embeddings
 pub async fn generate_embeddings(
-    client: &OpenAIClient<OpenAIConfig>,
-    documents: &[Document],
-    model: &str,
-) -> Result<(Vec<(String, Array1<f32>)>, usize), ServerError> { // Return tuple: (embeddings, total_tokens)
-    // eprintln!("Generating embeddings for {} documents...", documents.len());
+    documents: &[DocumentChunk],
+) -> Result<Vec<CachedChunkEmbedding>, ServerError> { // Removed usize from return tuple
+    let client = OPENAI_CLIENT
+        .get()
+        .expect("OpenAI client should be initialized");
 
-    // Get the tokenizer for the model and wrap in Arc
+    // Wrap BPE tokenizer in Arc for sharing across async tasks
     let bpe = Arc::new(cl100k_base().map_err(|e| ServerError::Tiktoken(e.to_string()))?);
 
-    const CONCURRENCY_LIMIT: usize = 8; // Number of concurrent requests
-    const TOKEN_LIMIT: usize = 8000; // Keep a buffer below the 8192 limit
-
-    let results = stream::iter(documents.iter().enumerate())
-        .map(|(index, doc)| {
-            // Clone client, model, doc, and Arc<BPE> for the async block
-            let client = client.clone();
-            let model = model.to_string();
-            let doc = doc.clone();
-            let bpe = Arc::clone(&bpe); // Clone the Arc pointer
-
+    // Use try_filter_map for cleaner error handling within the stream
+    let results = stream::iter(documents)
+        .map(|doc| {
+            // Clone client reference for the async block
+            let client_ref = client.clone();
+            // Clone the doc and bpe needed inside the async block
+            let doc_clone = doc.clone();
+            let bpe_arc_clone = Arc::clone(&bpe); // Clone the Arc pointer
             async move {
-                // Calculate token count for this document
-                let token_count = bpe.encode_with_special_tokens(&doc.content).len();
+                // Calculate token count first, propagating potential error
+                // Calculate token count first, handling potential error explicitly
+                // Calculate token count first, handling potential error explicitly
+                // Calculate token count first, handling potential error explicitly using ?
+                // Calculate token count first, handling potential error explicitly
+                // Calculate token count first, handling potential error explicitly with match
+                // Calculate token count first, handling potential error explicitly with match
+                // Calculate token count first, handling potential error explicitly using map_err and ?
+                // Calculate token count first, handling potential error explicitly with match
+                // Declare tokens variable first
+                // Handle tokenization result using if let/else
+                // Calculate token count first, handling potential error explicitly using map_err and ?
+                // Assume encode_with_special_tokens returns Vec<u32> directly based on compiler errors.
+                // NOTE: This means potential panics from tiktoken-rs are not caught here.
+                let tokens = bpe_arc_clone.encode_with_special_tokens(&doc_clone.content); // Use the Arc clone
+                // Now 'tokens' holds Vec<u32>
 
-                if token_count > TOKEN_LIMIT {
-                    // eprintln!(
-                    //     "    Skipping document {}: Actual tokens ({}) exceed limit ({}). Path: {}",
-                    //     index + 1,
-                    //     token_count,
-                    //     TOKEN_LIMIT,
-                    //     doc.path
-                    // );
-                    // Return Ok(None) to indicate skipping, with 0 tokens processed for this doc
-                    return Ok::<Option<(String, Array1<f32>, usize)>, ServerError>(None); // Include token count type
-                }
+                // Check token limit
+                if tokens.len() > TOKEN_LIMIT {
+                     eprintln!(
+                         "Skipping chunk {} from '{}' due to token limit ({} > {})",
+                         doc_clone.chunk_index, doc_clone.source_path, tokens.len(), TOKEN_LIMIT
+                     );
+                     // Explicitly state the full Result type including the Error variant
+                     return Ok::<Option<(DocumentChunk, Vec<f32>, usize)>, ServerError>(None);
+                 }
 
-                // Prepare input for this single document
-                let inputs: Vec<String> = vec![doc.content.clone()];
+                // Proceed with embedding request
+                let request = async_openai::types::CreateEmbeddingRequestArgs::default()
+                    .model(EMBEDDING_MODEL)
+                    .input(vec![doc_clone.content.clone()])
+                    .build()
+                    .map_err(ServerError::OpenAI)?;
 
-                let request = CreateEmbeddingRequestArgs::default()
-                    .model(&model) // Use cloned model string
-                    .input(inputs)
-                    .build()?; // Propagates OpenAIError
+                let response = client_ref.embeddings().create(request).await.map_err(ServerError::OpenAI)?;
 
-                // eprintln!(
-                //     "    Sending request for document {} ({} tokens)... Path: {}",
-                //     index + 1,
-                //     token_count, // Use correct variable name
-                //     doc.path
-                // );
-                let response = client.embeddings().create(request).await?; // Propagates OpenAIError
-                // eprintln!("    Received response for document {}.", index + 1);
+                let embedding_vector = response.data.into_iter().next()
+                    .ok_or_else(|| ServerError::OpenAI(async_openai::error::OpenAIError::ApiError(
+                        async_openai::error::ApiError {
+                            message: format!("No embedding returned for chunk {} from '{}'", doc_clone.chunk_index, doc_clone.source_path),
+                            r#type: Some("embedding_error".to_string()),
+                            param: None, code: None,
+                        }
+                    )))?.embedding;
 
-                if response.data.len() != 1 {
-                    return Err(ServerError::OpenAI(
-                        async_openai::error::OpenAIError::ApiError(OpenAIAPIErr {
-                            message: format!(
-                                "Mismatch in response length for document {}. Expected 1, got {}.",
-                                index + 1, response.data.len()
-                            ),
-                            r#type: Some("sdk_error".to_string()),
-                            param: None,
-                            code: None,
-                        }),
-                    ));
-                }
-
-                // Process result
-                let embedding_data = response.data.first().unwrap(); // Safe unwrap due to check above
-                let embedding_array = Array1::from(embedding_data.embedding.clone());
-                // Return Ok(Some(...)) for successful embedding, include token count
-                Ok(Some((doc.path.clone(), embedding_array, token_count))) // Include token count
+                // Return successful result
+                Ok(Some((doc_clone, embedding_vector, tokens.len())))
+                // Removed duplicated code block
             }
         })
-        .buffer_unordered(CONCURRENCY_LIMIT) // Run up to CONCURRENCY_LIMIT futures concurrently
-        .collect::<Vec<Result<Option<(String, Array1<f32>, usize)>, ServerError>>>() // Update collected result type
-        .await;
+        .buffer_unordered(CONCURRENCY_LIMIT)
+        .try_collect::<Vec<Option<(DocumentChunk, Vec<f32>, usize)>>>() // Add type annotation back
+        .await?; // Add back the ? operator here
 
-    // Process collected results, filtering out errors and skipped documents, summing tokens
-    let mut embeddings_vec = Vec::new();
-    let mut total_processed_tokens: usize = 0;
-    for result in results {
-        match result {
-            Ok(Some((path, embedding, tokens))) => {
-                embeddings_vec.push((path, embedding)); // Keep successful embeddings
-                total_processed_tokens += tokens; // Add tokens for successful ones
-            }
-            Ok(None) => {} // Ignore skipped documents
-            Err(e) => {
-                // Log error but potentially continue? Or return the first error?
-                // For now, let's return the first error encountered.
-                eprintln!("Error during concurrent embedding generation: {}", e);
-                return Err(e);
-            }
-        }
-    }
+    // Filter out None values (skipped chunks) and calculate total tokens
+    // let mut total_tokens = 0; // Removed token counting
+    // Explicitly type results after awaiting
+    let results: Vec<Option<(DocumentChunk, Vec<f32>, usize)>> = results;
 
-    eprintln!(
-        "Finished generating embeddings. Successfully processed {} documents ({} tokens).",
-        embeddings_vec.len(), total_processed_tokens
-    );
-    Ok((embeddings_vec, total_processed_tokens)) // Return tuple
+    // Use iterator chain again for filtering and mapping
+    let cached_embeddings: Vec<CachedChunkEmbedding> = results
+        .into_iter()
+        .filter_map(|opt_result| opt_result) // Filter out None values
+        .map(|(doc, vector, _count)| { // Map the Some(tuple) to CachedChunkEmbedding
+            // total_tokens += count; // Removed token counting
+            CachedChunkEmbedding {
+                source_path: doc.source_path,
+                chunk_index: doc.chunk_index,
+                content: doc.content,
+                vector, // Store the Vec<f32> directly
+            }
+        })
+        .collect();
+
+    Ok(cached_embeddings) // Return only the embeddings vector
 }
+
+// --- Cosine Similarity ---
+
+// Keep only one definition of cosine_similarity
+/// Calculates the cosine similarity between two vectors.
+pub fn cosine_similarity(a: ArrayView1<f32>, b: ArrayView1<f32>) -> f32 {
+    let dot_product = a.dot(&b);
+    let norm_a = a.dot(&a).sqrt();
+    let norm_b = b.dot(&b).sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0 // Avoid division by zero
+    } else {
+        dot_product / (norm_a * norm_b)
+    }
+}
+// Remove duplicate cosine_similarity definition (lines 212-221)
+// Remove duplicate generate_embeddings definition (lines 225-328)
+
+
+// Remove the serde_array module as it's no longer needed
+
+
+// Removed duplicate definitions

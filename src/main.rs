@@ -6,16 +6,16 @@ mod server; // Keep server module as RustDocsServer is defined there
 
 // Use necessary items from modules and crates
 use crate::{
-    doc_loader::Document,
-    embeddings::{generate_embeddings, CachedDocumentEmbedding, OPENAI_CLIENT},
+    // doc_loader::DocumentChunk, // Unused
+    embeddings::{CachedChunkEmbedding, OPENAI_CLIENT}, // Removed unused generate_embeddings
     error::ServerError,
-    server::RustDocsServer, // Import the updated RustDocsServer
+    server::RustDocsServer,
 };
 use async_openai::Client as OpenAIClient;
 use bincode::config;
 use cargo::core::PackageIdSpec;
 use clap::Parser; // Import clap Parser
-use ndarray::Array1;
+// use ndarray::Array1; // Remove unused Array1
 // Import rmcp items needed for the new approach
 use rmcp::{
     transport::io::stdio, // Use the standard stdio transport
@@ -130,8 +130,8 @@ async fn main() -> Result<(), ServerError> {
 
     // --- Try Loading Embeddings and Documents from Cache ---
     let mut loaded_from_cache = false;
-    let mut loaded_embeddings: Option<Vec<(String, Array1<f32>)>> = None;
-    let mut loaded_documents_from_cache: Option<Vec<Document>> = None;
+    // We'll load the combined chunk data directly
+    let mut loaded_cached_chunks: Option<Vec<CachedChunkEmbedding>> = None;
 
     if embeddings_file_path.exists() {
         eprintln!(
@@ -141,26 +141,18 @@ async fn main() -> Result<(), ServerError> {
         match File::open(&embeddings_file_path) {
             Ok(file) => {
                 let reader = BufReader::new(file);
-                match bincode::decode_from_reader::<Vec<CachedDocumentEmbedding>, _, _>(
+                // Decode directly into the target type Vec<CachedChunkEmbedding>
+                match bincode::decode_from_reader::<Vec<CachedChunkEmbedding>, _, _>(
                     reader,
                     config::standard(),
                 ) {
-                    Ok(cached_data) => {
+                    Ok(cached_chunks) => {
                         eprintln!(
-                            "Successfully loaded {} items from cache. Separating data...",
-                            cached_data.len()
+                            "Successfully loaded {} cached chunks from cache.",
+                            cached_chunks.len()
                         );
-                        let mut embeddings = Vec::with_capacity(cached_data.len());
-                        let mut documents = Vec::with_capacity(cached_data.len());
-                        for item in cached_data {
-                            embeddings.push((item.path.clone(), Array1::from(item.vector)));
-                            documents.push(Document {
-                                path: item.path,
-                                content: item.content,
-                            });
-                        }
-                        loaded_embeddings = Some(embeddings);
-                        loaded_documents_from_cache = Some(documents);
+                        // Store the loaded chunks directly
+                        loaded_cached_chunks = Some(cached_chunks);
                         loaded_from_cache = true;
                     }
                     Err(e) => {
@@ -177,9 +169,11 @@ async fn main() -> Result<(), ServerError> {
     }
 
     // --- Generate or Use Loaded Embeddings ---
-    let mut generated_tokens: Option<usize> = None;
-    let mut generation_cost: Option<f64> = None;
-    let mut documents_for_server: Vec<Document> = loaded_documents_from_cache.unwrap_or_default();
+    // We'll store the final list of chunks (either loaded or generated) here
+    let final_cached_chunks: Vec<CachedChunkEmbedding>;
+    // Removed unused variables related to cost calculation
+    // let mut generated_tokens: Option<usize> = None;
+    // let mut generation_cost: Option<f64> = None;
 
     // --- Initialize OpenAI Client (needed for question embedding even if cache hit) ---
     let openai_client = OpenAIClient::new();
@@ -187,135 +181,107 @@ async fn main() -> Result<(), ServerError> {
         .set(openai_client.clone()) // Clone the client for the OnceCell
         .expect("Failed to set OpenAI client");
 
-    let final_embeddings = match loaded_embeddings {
-        Some(embeddings) => {
-            eprintln!("Using embeddings and documents loaded from cache.");
-            embeddings
-        }
-        None => {
-            eprintln!("Proceeding with documentation loading and embedding generation.");
+    // Decide whether to use cached chunks or generate new ones
+    if let Some(cached_chunks) = loaded_cached_chunks {
+         eprintln!("Using {} chunks loaded from cache.", cached_chunks.len());
+         final_cached_chunks = cached_chunks;
+        } // End: if let Some(cached_chunks) block
+    // Corrected 'else' block for cache miss, associated with the 'if let' on line 184
+    else {
+        // --- Generate Docs & Embeddings (Cache Miss) ---
+        eprintln!("Cache miss. Proceeding with documentation loading and embedding generation.");
 
-            let _openai_api_key = env::var("OPENAI_API_KEY")
-                .map_err(|_| ServerError::MissingEnvVar("OPENAI_API_KEY".to_string()))?;
+        // Ensure OpenAI key is available before proceeding
+        let _openai_api_key = env::var("OPENAI_API_KEY")
+            .map_err(|_| ServerError::MissingEnvVar("OPENAI_API_KEY".to_string()))?;
 
-            eprintln!(
-                "Loading documents for crate: {} (Version Req: {}, Features: {:?})",
-                crate_name, crate_version_req, features
-            );
-            // Pass features to load_documents
-            let loaded_documents =
-                doc_loader::load_documents(&crate_name, &crate_version_req, features.as_ref())?; // Pass features here
-            eprintln!("Loaded {} documents.", loaded_documents.len());
-            documents_for_server = loaded_documents.clone();
+        eprintln!(
+            "Loading and chunking documents for crate: {} (Version Req: {}, Features: {:?})",
+            crate_name, crate_version_req, features
+        );
+        // Load and chunk documents - returns Result<Vec<DocumentChunk>, DocLoaderError>
+        let loaded_chunks =
+            doc_loader::load_documents(&crate_name, &crate_version_req, features.as_ref())?;
+        eprintln!("Created {} document chunks.", loaded_chunks.len());
 
-            eprintln!("Generating embeddings...");
-            let (generated_embeddings, total_tokens) = generate_embeddings(
-                &openai_client,
-                &loaded_documents,
-                "text-embedding-3-small",
-            )
-            .await?;
+        // Check if chunks were actually created before trying to embed
+        if loaded_chunks.is_empty() {
+             eprintln!("No document chunks were created. Proceeding without embeddings.");
+             // Set final_cached_chunks to empty if no source chunks were loaded
+             final_cached_chunks = Vec::new();
+        } else {
+            eprintln!("Generating embeddings for {} chunks...", loaded_chunks.len());
+            // Generate embeddings for the loaded chunks
+            // generate_embeddings now returns Result<(Vec<CachedChunkEmbedding>, usize), ServerError>
+            // generate_embeddings now only returns the Vec of embeddings
+            let generated_cached_chunks =
+                embeddings::generate_embeddings(&loaded_chunks).await?;
+            // let total_tokens = 0; // Removed - cost calculation skipped for now
 
-            let cost_per_million = 0.02;
-            let estimated_cost = (total_tokens as f64 / 1_000_000.0) * cost_per_million;
-            eprintln!(
-                "Embedding generation cost for {} tokens: ${:.6}",
-                total_tokens, estimated_cost
-            );
-            generated_tokens = Some(total_tokens);
-            generation_cost = Some(estimated_cost);
+            eprintln!("Successfully generated {} embeddings.", generated_cached_chunks.len());
+            // generated_tokens = Some(0); // Removed - No longer tracking tokens
+            // Assign the generated chunks to final_cached_chunks
+            final_cached_chunks = generated_cached_chunks;
 
-            eprintln!(
-                "Saving generated documents and embeddings to: {:?}",
-                embeddings_file_path
-            );
+            // Calculate cost (example for text-embedding-3-small)
+            // let cost_per_1k_tokens = 0.00002; // Removed
+            // Cost calculation removed
+            // generation_cost = Some(cost);
+            // eprintln!( // Removed cost printing
+            //     "Estimated OpenAI Embedding Cost: ~${:.6}",
+            //     cost
+            // );
 
-            let mut combined_cache_data: Vec<CachedDocumentEmbedding> = Vec::new();
-            let embedding_map: std::collections::HashMap<String, Array1<f32>> =
-                generated_embeddings.clone().into_iter().collect();
-
-            for doc in &loaded_documents {
-                if let Some(embedding_array) = embedding_map.get(&doc.path) {
-                    combined_cache_data.push(CachedDocumentEmbedding {
-                        path: doc.path.clone(),
-                        content: doc.content.clone(),
-                        vector: embedding_array.to_vec(),
-                    });
-                } else {
-                    eprintln!(
-                        "Warning: Embedding not found for document path: {}. Skipping from cache.",
-                        doc.path
-                    );
+            // --- Save Generated Chunks to Cache ---
+            // Only attempt to save if embeddings were actually generated
+            if !final_cached_chunks.is_empty() {
+                eprintln!("Saving {} generated chunks to cache: {:?}", final_cached_chunks.len(), embeddings_file_path);
+                // Ensure parent directory exists
+                if let Some(parent_dir) = embeddings_file_path.parent() {
+                    fs::create_dir_all(parent_dir).map_err(ServerError::Io)?;
                 }
-            }
-
-            match bincode::encode_to_vec(&combined_cache_data, config::standard()) {
-                Ok(encoded_bytes) => {
-                    if let Some(parent_dir) = embeddings_file_path.parent() {
-                        if !parent_dir.exists() {
-                            if let Err(e) = fs::create_dir_all(parent_dir) {
-                                eprintln!(
-                                    "Warning: Failed to create cache directory {}: {}",
-                                    parent_dir.display(),
-                                    e
-                                );
-                            }
+                // Encode data to Vec<u8> first
+                match bincode::encode_to_vec(&final_cached_chunks, config::standard()) {
+                    Ok(encoded_bytes) => {
+                        // Try to write the encoded bytes to the file
+                        match fs::write(&embeddings_file_path, encoded_bytes) {
+                            Ok(_) => eprintln!("Successfully saved data to cache."),
+                            Err(e) => eprintln!("Warning: Failed to write cache file: {}", e), // Log file write error
                         }
                     }
-                    if let Err(e) = fs::write(&embeddings_file_path, encoded_bytes) {
-                        eprintln!("Warning: Failed to write cache file: {}", e);
-                    } else {
-                        eprintln!(
-                            "Cache saved successfully ({} items).",
-                            combined_cache_data.len()
-                        );
-                    }
+                    Err(e) => eprintln!("Warning: Failed to encode cache data: {}", e), // Log encoding error
                 }
-                Err(e) => {
-                    eprintln!("Warning: Failed to encode data for cache: {}", e);
-                }
+            } else {
+                 eprintln!("Skipping cache save as no embeddings were generated.");
             }
-            generated_embeddings
         }
-    };
+    } // End cache miss 'else' block
 
-    // --- Initialize and Start Server ---
-    eprintln!(
-        "Initializing server for crate: {} (Version Req: {}, Features: {:?})",
-        crate_name, crate_version_req, features
+
+    // --- Prepare Server Startup Message ---
+    // --- Prepare Server Startup Message ---
+    let startup_message = format!( // Removed mut
+        "RustDocs MCP Server Initialized.\nCrate: {}\nVersion Req: {}\nFeatures: {:?}\nCache Used: {}\n{} Chunks Ready.",
+        crate_name,
+        crate_version_req,
+        features.as_deref().unwrap_or(&[]), // Display features nicely
+        if loaded_from_cache { "Yes" } else { "No" },
+        final_cached_chunks.len() // Use length of final chunks
     );
+    // Removed cost message appending from startup message
+    // if let Some(cost) = generation_cost {
+    //     let cost_msg = format!("\nGeneration Cost: ~${:.6} ({} tokens)", cost, generated_tokens.unwrap_or(0));
+    //     startup_message.push_str(&cost_msg);
+    // }
 
-    let features_str = features
-        .as_ref()
-        .map(|f| format!(" Features: {:?}", f))
-        .unwrap_or_default();
-
-    let startup_message = if loaded_from_cache {
-        format!(
-            "Server for crate '{}' (Version Req: '{}'{}) initialized. Loaded {} embeddings from cache.",
-            crate_name, crate_version_req, features_str, final_embeddings.len()
-        )
-    } else {
-        let tokens = generated_tokens.unwrap_or(0);
-        let cost = generation_cost.unwrap_or(0.0);
-        format!(
-            "Server for crate '{}' (Version Req: '{}'{}) initialized. Generated {} embeddings for {} tokens (Est. Cost: ${:.6}).",
-            crate_name,
-            crate_version_req,
-            features_str,
-            final_embeddings.len(),
-            tokens,
-            cost
-        )
-    };
-
-    // Create the service instance using the updated ::new()
+     // --- Start Server ---
+    eprintln!("{}", startup_message); // Log startup message to stderr
+    // Create the service instance using the final cached chunks
     let service = RustDocsServer::new(
-        crate_name.clone(), // Pass crate_name directly
-        documents_for_server,
-        final_embeddings,
-        startup_message,
-    )?;
+        crate_name.clone(),
+        final_cached_chunks, // Pass the final Vec<CachedChunkEmbedding>
+        startup_message,     // Pass the generated startup message
+    )?; // Propagate error from new() if needed
 
     // --- Use standard stdio transport and ServiceExt ---
     eprintln!("Rust Docs MCP server starting via stdio...");

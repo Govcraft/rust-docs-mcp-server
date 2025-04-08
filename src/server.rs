@@ -1,7 +1,7 @@
 use crate::{
-    doc_loader::Document,
-    embeddings::{OPENAI_CLIENT, cosine_similarity},
-    error::ServerError, // Keep ServerError for ::new()
+    // doc_loader::Document, // Remove Document import
+    embeddings::{OPENAI_CLIENT, cosine_similarity, CachedChunkEmbedding}, // Add CachedChunkEmbedding
+    error::ServerError,
 };
 use async_openai::{
     types::{
@@ -10,6 +10,7 @@ use async_openai::{
     },
     // Client as OpenAIClient, // Removed unused import
 };
+use ndarray::ArrayView1; // Import ArrayView1
 use ndarray::Array1;
 use rmcp::model::AnnotateAble; // Import trait for .no_annotation()
 use rmcp::{
@@ -46,9 +47,15 @@ use rmcp::{
     tool,
 };
 use schemars::JsonSchema; // Import JsonSchema
+use ordered_float::OrderedFloat; // For using f32 in BinaryHeap
 use serde::Deserialize; // Import Deserialize
 use serde_json::json;
-use std::{/* borrow::Cow, */ env, sync::Arc}; // Removed borrow::Cow
+use std::{
+    cmp::Reverse, // For max-heap behavior with BinaryHeap
+    collections::BinaryHeap, // For efficient Top-K retrieval
+    env,
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 
 // --- Argument Struct for the Tool ---
@@ -65,28 +72,27 @@ struct QueryRustDocsArgs {
 // No longer needs ServerState, holds data directly
 #[derive(Clone)] // Add Clone for tool macro requirements
 pub struct RustDocsServer {
-    crate_name: Arc<String>, // Use Arc for cheap cloning
-    documents: Arc<Vec<Document>>,
-    embeddings: Arc<Vec<(String, Array1<f32>)>>,
+    crate_name: Arc<String>,
+    // Store the combined chunk data directly
+    cached_chunks: Arc<Vec<CachedChunkEmbedding>>,
     peer: Arc<Mutex<Option<Peer<RoleServer>>>>, // Uses tokio::sync::Mutex
     startup_message: Arc<Mutex<Option<String>>>, // Keep the message itself
     startup_message_sent: Arc<Mutex<bool>>,     // Flag to track if sent (using tokio::sync::Mutex)
-                                                // tool_name and info are handled by ServerHandler/macros now
 }
 
 impl RustDocsServer {
-    // Updated constructor
+    /// Creates a new instance of the RustDocsServer.
     pub fn new(
         crate_name: String,
-        documents: Vec<Document>,
-        embeddings: Vec<(String, Array1<f32>)>,
+        // Accept the combined cached chunk data
+        cached_chunks: Vec<CachedChunkEmbedding>,
         startup_message: String,
     ) -> Result<Self, ServerError> {
         // Keep ServerError for potential future init errors
         Ok(Self {
             crate_name: Arc::new(crate_name),
-            documents: Arc::new(documents),
-            embeddings: Arc::new(embeddings),
+            // Store the Arc'd vector of cached chunks
+            cached_chunks: Arc::new(cached_chunks),
             peer: Arc::new(Mutex::new(None)), // Uses tokio::sync::Mutex
             startup_message: Arc::new(Mutex::new(Some(startup_message))), // Initialize message
             startup_message_sent: Arc::new(Mutex::new(false)), // Initialize flag to false
@@ -195,81 +201,116 @@ impl RustDocsServer {
 
         let question_vector = Array1::from(question_embedding.embedding.clone());
 
-        // --- Find Best Matching Document ---
-        let mut best_match: Option<(&str, f32)> = None;
-        for (path, doc_embedding) in self.embeddings.iter() {
-            let score = cosine_similarity(question_vector.view(), doc_embedding.view());
-            if best_match.is_none() || score > best_match.unwrap().1 {
-                best_match = Some((path, score));
+        // --- Find Top K Matching Chunks ---
+        const K: usize = 5; // Number of top chunks to retrieve
+        // Use a Min-Heap to keep track of the top K highest scores.
+        // Store (Reverse<OrderedFloat<f32>>, usize) where usize is the index
+        // into self.cached_chunks. This avoids needing Ord on CachedChunkEmbedding.
+        let mut top_k_heap = BinaryHeap::with_capacity(K + 1);
+
+        // Iterate through the cached chunks with their indices
+        for (index, chunk) in self.cached_chunks.iter().enumerate() {
+            // Calculate similarity between question and chunk's vector
+            let chunk_vector_view = ArrayView1::from(&chunk.vector);
+            let score = cosine_similarity(question_vector.view(), chunk_vector_view);
+
+            // Wrap score for ordering and heap compatibility
+            let ordered_score = OrderedFloat(score);
+
+            // Push the score and the chunk's index onto the heap
+            top_k_heap.push((Reverse(ordered_score), index));
+
+            // If the heap exceeds K elements, remove the smallest score
+            if top_k_heap.len() > K {
+                top_k_heap.pop();
             }
         }
 
-        // --- Generate Response using LLM ---
-        let response_text = match best_match {
-            Some((best_path, _score)) => {
-                eprintln!("Best match found: {}", best_path);
-                let context_doc = self.documents.iter().find(|doc| doc.path == best_path);
+        // Extract the top K chunks from the heap. They will be in ascending score order.
+        // Convert the heap into a sorted vector (descending score) for easier processing.
+        // Extract the top K (score, index) pairs from the heap.
+        // Convert the heap into a sorted vector (descending score).
+        let top_k_indices_scores: Vec<_> = top_k_heap.into_sorted_vec();
 
-                if let Some(doc) = context_doc {
-                    let system_prompt = format!(
-                        "You are an expert technical assistant for the Rust crate '{}'. \
-                         Answer the user's question based *only* on the provided context. \
-                         If the context does not contain the answer, say so. \
-                         Do not make up information. Be clear, concise, and comprehensive providing example usage code when possible.",
-                        self.crate_name
-                    );
-                    let user_prompt = format!(
-                        "Context:\n---\n{}\n---\n\nQuestion: {}",
-                        doc.content, question
-                    );
+        // --- Generate Response using LLM with Best Chunk Context ---
+        // --- Generate Response using LLM with Top K Chunks Context ---
+        // Use standard if/else statement instead of expression for assignment
+        let response_text: String;
+        if top_k_indices_scores.is_empty() {
+             response_text = "Could not find any relevant document chunk context.".to_string();
+        } else {
+            // Combine the content of the top K chunks into a single context string
+            let combined_context = top_k_indices_scores
+                .iter()
+                .rev() // Highest score first
+                .map(|(Reverse(score), index)| { // Iterate over (score, index)
+                    // Get the actual chunk using the index *before* formatting
+                    let chunk = &self.cached_chunks[*index];
+                    format!(
+                        "Source: {} (Chunk {})\nScore: {:.4}\nContent:\n{}\n---\n",
+                        chunk.source_path, chunk.chunk_index, score.into_inner(), chunk.content
+                    ) // format! is now the return value of the closure
+                })
+                .collect::<String>();
 
-                    let chat_request = CreateChatCompletionRequestArgs::default()
-                        .model("gpt-4o-mini-2024-07-18")
-                        .messages(vec![
-                            ChatCompletionRequestSystemMessageArgs::default()
-                                .content(system_prompt)
-                                .build()
-                                .map_err(|e| {
-                                    McpError::internal_error(
-                                        format!("Failed to build system message: {}", e),
-                                        None,
-                                    )
-                                })?
-                                .into(),
-                            ChatCompletionRequestUserMessageArgs::default()
-                                .content(user_prompt)
-                                .build()
-                                .map_err(|e| {
-                                    McpError::internal_error(
-                                        format!("Failed to build user message: {}", e),
-                                        None,
-                                    )
-                                })?
-                                .into(),
-                        ])
-                        .build()
-                        .map_err(|e| {
-                            McpError::internal_error(
-                                format!("Failed to build chat request: {}", e),
-                                None,
-                            )
-                        })?;
+             eprintln!(
+                 "Found {} relevant chunks. Combined context length: {} chars.", // Use correct variable for count
+                 top_k_indices_scores.len(), combined_context.len()
+             );
 
-                    let chat_response = client.chat().create(chat_request).await.map_err(|e| {
-                        McpError::internal_error(format!("OpenAI chat API error: {}", e), None)
-                    })?;
+             // Update prompts
+             let system_prompt = format!( /* ... same as before ... */
+                 "You are an expert technical assistant for the Rust crate '{}'. \
+                  Answer the user's question based *only* on the provided context snippets below. \
+                  Synthesize the information from all relevant snippets. \
+                  If the context does not contain the answer, state that clearly. \
+                  Do not make up information. Be clear, concise, and comprehensive, providing example usage code when possible.",
+                 self.crate_name
+             );
+             let user_prompt = format!( /* ... same as before ... */
+                 "Context Snippets:\n===\n{}\n===\n\nQuestion: {}",
+                 combined_context, question
+             );
 
-                    chat_response
-                        .choices
-                        .first()
-                        .and_then(|choice| choice.message.content.clone())
-                        .unwrap_or_else(|| "Error: No response from LLM.".to_string())
+            // Perform the chat completion request, handling errors internally to produce a String
+            let system_message_result = ChatCompletionRequestSystemMessageArgs::default()
+                .content(system_prompt)
+                .build();
+            let user_message_result = ChatCompletionRequestUserMessageArgs::default()
+                .content(user_prompt)
+                .build();
+
+            if let Err(e) = system_message_result {
+                response_text = format!("Error building system message: {}", e);
+            } else if let Err(e) = user_message_result {
+                response_text = format!("Error building user message: {}", e);
+            } else {
+                // Messages built successfully, proceed to build request
+                let chat_request_result = CreateChatCompletionRequestArgs::default()
+                    .model("gpt-4o-mini-2024-07-18")
+                    .messages(vec![system_message_result.unwrap().into(), user_message_result.unwrap().into()])
+                    .build();
+
+                if let Err(e) = chat_request_result {
+                     response_text = format!("Error building chat request: {}", e);
                 } else {
-                    "Error: Could not find content for best matching document.".to_string()
+                     // Request built successfully, make the API call
+                     match client.chat().create(chat_request_result.unwrap()).await {
+                         Ok(chat_response) => {
+                             // Extract the response content or provide a default error message
+                             response_text = chat_response
+                                 .choices
+                                 .first()
+                                 .and_then(|choice| choice.message.content.clone())
+                                 .unwrap_or_else(|| "Error: No response content from LLM.".to_string());
+                         }
+                         Err(e) => {
+                             response_text = format!("OpenAI chat API error: {}", e); // Assign error string on API failure
+                         }
+                     }
                 }
             }
-            None => "Could not find any relevant document context.".to_string(),
-        };
+        } // End of else block
 
         // --- Format and Return Result ---
         Ok(CallToolResult::success(vec![Content::text(format!(

@@ -13,6 +13,7 @@ thiserror = "1"
 walkdir = "2.5.0"
 scraper = "0.23.1"
 ndarray = { version = "0.16.1", features = ["serde"] } # Enable serde feature
+ordered-float = "4.2.0" # For using f32 in BinaryHeap
 async-openai = "0.28.0"
 # async-trait = "0.1.88" # Removed, likely no longer needed
 futures = "0.3"
@@ -25,6 +26,8 @@ anyhow = "1.0.97"
 schemars = "0.8.22"
 clap = { version = "4.5.34", features = ["cargo", "derive", "env"] }
 regex = "1.11.1"
+# Enable tiktoken-rs feature for text-splitter
+text-splitter = { version = "0.25.1", features = ["tiktoken-rs"] }
 
 
 # --- Platform Specific Dependencies ---
