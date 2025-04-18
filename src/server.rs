@@ -175,8 +175,10 @@ impl RustDocsServer {
             .get()
             .ok_or_else(|| McpError::internal_error("OpenAI client not initialized", None))?;
 
+        let embedding_model: String =
+            env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
         let question_embedding_request = CreateEmbeddingRequestArgs::default()
-            .model("text-embedding-3-small")
+            .model(embedding_model)
             .input(question.to_string())
             .build()
             .map_err(|e| {
@@ -223,8 +225,10 @@ impl RustDocsServer {
                         doc.content, question
                     );
 
+                    let llm_model: String = env::var("LLM_MODEL")
+                        .unwrap_or_else(|_| "gpt-4o-mini-2024-07-18".to_string());
                     let chat_request = CreateChatCompletionRequestArgs::default()
-                        .model("gpt-4o-mini-2024-07-18")
+                        .model(llm_model)
                         .messages(vec![
                             ChatCompletionRequestSystemMessageArgs::default()
                                 .content(system_prompt)
@@ -379,5 +383,4 @@ impl ServerHandler for RustDocsServer {
             resource_templates: Vec::new(), // No templates defined yet
         })
     }
-
 }

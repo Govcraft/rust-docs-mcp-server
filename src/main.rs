@@ -11,7 +11,7 @@ use crate::{
     error::ServerError,
     server::RustDocsServer, // Import the updated RustDocsServer
 };
-use async_openai::Client as OpenAIClient;
+use async_openai::{Client as OpenAIClient, config::OpenAIConfig};
 use bincode::config;
 use cargo::core::PackageIdSpec;
 use clap::Parser; // Import clap Parser
@@ -182,7 +182,12 @@ async fn main() -> Result<(), ServerError> {
     let mut documents_for_server: Vec<Document> = loaded_documents_from_cache.unwrap_or_default();
 
     // --- Initialize OpenAI Client (needed for question embedding even if cache hit) ---
-    let openai_client = OpenAIClient::new();
+    let openai_client = if let Ok(api_base) = env::var("OPENAI_API_BASE") {
+        let config = OpenAIConfig::new().with_api_base(api_base);
+        OpenAIClient::with_config(config)
+    } else {
+        OpenAIClient::new()
+    };
     OPENAI_CLIENT
         .set(openai_client.clone()) // Clone the client for the OnceCell
         .expect("Failed to set OpenAI client");
@@ -209,12 +214,10 @@ async fn main() -> Result<(), ServerError> {
             documents_for_server = loaded_documents.clone();
 
             eprintln!("Generating embeddings...");
-            let (generated_embeddings, total_tokens) = generate_embeddings(
-                &openai_client,
-                &loaded_documents,
-                "text-embedding-3-small",
-            )
-            .await?;
+            let embedding_model: String = env::var("EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "text-embedding-3-small".to_string());
+            let (generated_embeddings, total_tokens) =
+                generate_embeddings(&openai_client, &loaded_documents, &embedding_model).await?;
 
             let cost_per_million = 0.02;
             let estimated_cost = (total_tokens as f64 / 1_000_000.0) * cost_per_million;
