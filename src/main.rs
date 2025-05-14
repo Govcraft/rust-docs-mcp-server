@@ -29,7 +29,7 @@ use std::{
     io::BufReader,
     path::PathBuf,
 };
-use url; // Add url crate for URL parsing
+// Removed unused url import
 #[cfg(not(target_os = "windows"))]
 use xdg::BaseDirectories;
 

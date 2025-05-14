@@ -49,6 +49,10 @@ use serde_json::json;
 use std::{env, sync::Arc};
 use tokio::sync::Mutex;
 
+// Add Ollama imports for chat completion - using the correct import paths
+use ollama_rs::generation::chat::{ChatMessage, MessageRole};
+use ollama_rs::generation::chat::request::ChatMessageRequest;
+
 // --- Argument Struct for the Tool ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -162,6 +166,107 @@ impl RustDocsServer {
             None,
         ))
     }
+
+    /// Generate chat completion using Ollama or OpenAI
+    async fn generate_chat_completion(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, McpError> {
+        // First try Ollama (preferred for consistency)
+        if let Some(ollama_client) = OLLAMA_CLIENT.get() {
+            // Get the chat model from environment variable, default to llama3.2
+            let chat_model = env::var("OLLAMA_CHAT_MODEL")
+                .unwrap_or_else(|_| "llama3.2".to_string());
+            
+            self.send_log(
+                LoggingLevel::Info,
+                format!("Using Ollama for chat completion with model: {}", chat_model),
+            );
+
+            // Create the chat messages - system message followed by user message
+            let messages = vec![
+                ChatMessage::system(system_prompt.to_string()),
+                ChatMessage::user(user_prompt.to_string()),
+            ];
+
+            // Create the chat request
+            let chat_request = ChatMessageRequest::new(chat_model, messages);
+
+            match ollama_client.send_chat_messages(chat_request).await {
+                Ok(response) => {
+                    // The response.message is a ChatMessage directly, not an Option
+                    // We need to access its content field
+                    return Ok(response.message.content);
+                }
+                Err(e) => {
+                    eprintln!("Failed to generate chat completion with Ollama: {}", e);
+                    self.send_log(
+                        LoggingLevel::Warning,
+                        format!("Ollama chat failed, trying OpenAI fallback: {}", e),
+                    );
+                }
+            }
+        }
+
+        // Fallback to OpenAI if Ollama fails or is not available
+        if let Some(openai_client) = OPENAI_CLIENT.get() {
+            self.send_log(
+                LoggingLevel::Info,
+                "Using OpenAI for chat completion".to_string(),
+            );
+
+            let llm_model: String = env::var("LLM_MODEL")
+                .unwrap_or_else(|_| "gpt-4o-mini-2024-07-18".to_string());
+
+            let chat_request = CreateChatCompletionRequestArgs::default()
+                .model(llm_model)
+                .messages(vec![
+                    ChatCompletionRequestSystemMessageArgs::default()
+                        .content(system_prompt)
+                        .build()
+                        .map_err(|e| {
+                            McpError::internal_error(
+                                format!("Failed to build system message: {}", e),
+                                None,
+                            )
+                        })?
+                        .into(),
+                    ChatCompletionRequestUserMessageArgs::default()
+                        .content(user_prompt)
+                        .build()
+                        .map_err(|e| {
+                            McpError::internal_error(
+                                format!("Failed to build user message: {}", e),
+                                None,
+                            )
+                        })?
+                        .into(),
+                ])
+                .build()
+                .map_err(|e| {
+                    McpError::internal_error(
+                        format!("Failed to build chat request: {}", e),
+                        None,
+                    )
+                })?;
+
+            let chat_response = openai_client.chat().create(chat_request).await.map_err(|e| {
+                McpError::internal_error(format!("OpenAI chat API error: {}", e), None)
+            })?;
+
+            return chat_response
+                .choices
+                .first()
+                .and_then(|choice| choice.message.content.clone())
+                .ok_or_else(|| McpError::internal_error("No response from OpenAI", None));
+        }
+
+        Err(McpError::internal_error(
+            "No chat client available (neither Ollama nor OpenAI)",
+            None,
+        ))
+    }
 }
 
 // --- Tool Implementation ---
@@ -227,11 +332,6 @@ impl RustDocsServer {
                 let context_doc = self.documents.iter().find(|doc| doc.path == best_path);
 
                 if let Some(doc) = context_doc {
-                    // Ensure we have an OpenAI client for chat completion
-                    let openai_client = OPENAI_CLIENT.get().ok_or_else(|| {
-                        McpError::internal_error("OpenAI client not available for chat completion", None)
-                    })?;
-
                     let system_prompt = format!(
                         "You are an expert technical assistant for the Rust crate '{}'. \
                          Answer the user's question based *only* on the provided context. \
@@ -244,49 +344,8 @@ impl RustDocsServer {
                         doc.content, question
                     );
 
-                    let llm_model: String = env::var("LLM_MODEL")
-                        .unwrap_or_else(|_| "gpt-4o-mini-2024-07-18".to_string());
-                    let chat_request = CreateChatCompletionRequestArgs::default()
-                        .model(llm_model)
-                        .messages(vec![
-                            ChatCompletionRequestSystemMessageArgs::default()
-                                .content(system_prompt)
-                                .build()
-                                .map_err(|e| {
-                                    McpError::internal_error(
-                                        format!("Failed to build system message: {}", e),
-                                        None,
-                                    )
-                                })?
-                                .into(),
-                            ChatCompletionRequestUserMessageArgs::default()
-                                .content(user_prompt)
-                                .build()
-                                .map_err(|e| {
-                                    McpError::internal_error(
-                                        format!("Failed to build user message: {}", e),
-                                        None,
-                                    )
-                                })?
-                                .into(),
-                        ])
-                        .build()
-                        .map_err(|e| {
-                            McpError::internal_error(
-                                format!("Failed to build chat request: {}", e),
-                                None,
-                            )
-                        })?;
-
-                    let chat_response = openai_client.chat().create(chat_request).await.map_err(|e| {
-                        McpError::internal_error(format!("OpenAI chat API error: {}", e), None)
-                    })?;
-
-                    chat_response
-                        .choices
-                        .first()
-                        .and_then(|choice| choice.message.content.clone())
-                        .unwrap_or_else(|| "Error: No response from LLM.".to_string())
+                    // Use the new chat completion method that supports both Ollama and OpenAI
+                    self.generate_chat_completion(&system_prompt, &user_prompt).await?
                 } else {
                     "Error: Could not find content for best matching document.".to_string()
                 }
@@ -312,11 +371,13 @@ impl ServerHandler for RustDocsServer {
             .enable_logging()
             .build();
 
-        // Determine which embedding model is being used
-        let embedding_info = if OLLAMA_CLIENT.get().is_some() {
-            "locally with Ollama/nomic-embed-text"
+        // Determine which embedding and chat models are being used
+        let model_info = if OLLAMA_CLIENT.get().is_some() {
+            let chat_model = env::var("OLLAMA_CHAT_MODEL")
+                .unwrap_or_else(|_| "llama3.2".to_string());
+            format!("locally with Ollama (nomic-embed-text for embeddings, {} for chat)", chat_model)
         } else {
-            "with OpenAI"
+            "with OpenAI".to_string()
         };
 
         ServerInfo {
@@ -330,8 +391,8 @@ impl ServerHandler for RustDocsServer {
                 "This server provides tools to query documentation for the '{}' crate. \
                  Use the 'query_rust_docs' tool with a specific question to get information \
                  about its API, usage, and examples, derived from its official documentation. \
-                 Embeddings are generated {}.",
-                self.crate_name, embedding_info
+                 Running {}.",
+                self.crate_name, model_info
             )),
         }
     }
