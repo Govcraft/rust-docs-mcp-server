@@ -1,31 +1,30 @@
 use crate::{
     doc_loader::Document,
-    embeddings::{OPENAI_CLIENT, cosine_similarity},
-    error::ServerError, // Keep ServerError for ::new()
+    embeddings::{OPENAI_CLIENT, OLLAMA_CLIENT, cosine_similarity, generate_single_ollama_embedding},
+    error::ServerError,
 };
 use async_openai::{
     types::{
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
         CreateChatCompletionRequestArgs, CreateEmbeddingRequestArgs,
     },
-    // Client as OpenAIClient, // Removed unused import
 };
 use ndarray::Array1;
-use rmcp::model::AnnotateAble; // Import trait for .no_annotation()
+use rmcp::model::AnnotateAble;
 use rmcp::{
     Error as McpError,
     Peer,
-    ServerHandler, // Import necessary rmcp items
+    ServerHandler,
     model::{
         CallToolResult,
         Content,
         GetPromptRequestParam,
         GetPromptResult,
-        /* EmptyObject, ErrorCode, */ Implementation,
-        ListPromptsResult, // Removed EmptyObject, ErrorCode
+        Implementation,
+        ListPromptsResult,
         ListResourceTemplatesResult,
         ListResourcesResult,
-        LoggingLevel, // Uncommented ListToolsResult
+        LoggingLevel,
         LoggingMessageNotification,
         LoggingMessageNotificationMethod,
         LoggingMessageNotificationParam,
@@ -33,7 +32,6 @@ use rmcp::{
         PaginatedRequestParam,
         ProtocolVersion,
         RawResource,
-        /* Prompt, PromptArgument, PromptMessage, PromptMessageContent, PromptMessageRole, */ // Removed Prompt types
         ReadResourceRequestParam,
         ReadResourceResult,
         Resource,
@@ -45,10 +43,10 @@ use rmcp::{
     service::{RequestContext, RoleServer},
     tool,
 };
-use schemars::JsonSchema; // Import JsonSchema
-use serde::Deserialize; // Import Deserialize
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::json;
-use std::{/* borrow::Cow, */ env, sync::Arc}; // Removed borrow::Cow
+use std::{env, sync::Arc};
 use tokio::sync::Mutex;
 
 // --- Argument Struct for the Tool ---
@@ -57,43 +55,37 @@ use tokio::sync::Mutex;
 struct QueryRustDocsArgs {
     #[schemars(description = "The specific question about the crate's API or usage.")]
     question: String,
-    // Removed crate_name field as it's implicit to the server instance
 }
 
 // --- Main Server Struct ---
 
-// No longer needs ServerState, holds data directly
-#[derive(Clone)] // Add Clone for tool macro requirements
+#[derive(Clone)]
 pub struct RustDocsServer {
-    crate_name: Arc<String>, // Use Arc for cheap cloning
+    crate_name: Arc<String>,
     documents: Arc<Vec<Document>>,
     embeddings: Arc<Vec<(String, Array1<f32>)>>,
-    peer: Arc<Mutex<Option<Peer<RoleServer>>>>, // Uses tokio::sync::Mutex
-    startup_message: Arc<Mutex<Option<String>>>, // Keep the message itself
-    startup_message_sent: Arc<Mutex<bool>>,     // Flag to track if sent (using tokio::sync::Mutex)
-                                                // tool_name and info are handled by ServerHandler/macros now
+    peer: Arc<Mutex<Option<Peer<RoleServer>>>>,
+    startup_message: Arc<Mutex<Option<String>>>,
+    startup_message_sent: Arc<Mutex<bool>>,
 }
 
 impl RustDocsServer {
-    // Updated constructor
     pub fn new(
         crate_name: String,
         documents: Vec<Document>,
         embeddings: Vec<(String, Array1<f32>)>,
         startup_message: String,
     ) -> Result<Self, ServerError> {
-        // Keep ServerError for potential future init errors
         Ok(Self {
             crate_name: Arc::new(crate_name),
             documents: Arc::new(documents),
             embeddings: Arc::new(embeddings),
-            peer: Arc::new(Mutex::new(None)), // Uses tokio::sync::Mutex
-            startup_message: Arc::new(Mutex::new(Some(startup_message))), // Initialize message
-            startup_message_sent: Arc::new(Mutex::new(false)), // Initialize flag to false
+            peer: Arc::new(Mutex::new(None)),
+            startup_message: Arc::new(Mutex::new(Some(startup_message))),
+            startup_message_sent: Arc::new(Mutex::new(false)),
         })
     }
 
-    // Helper function to send log messages via MCP notification (remains mostly the same)
     pub fn send_log(&self, level: LoggingLevel, message: String) {
         let peer_arc = Arc::clone(&self.peer);
         tokio::spawn(async move {
@@ -119,25 +111,69 @@ impl RustDocsServer {
         });
     }
 
-    // Helper for creating simple text resources (like in counter example)
     fn _create_resource_text(&self, uri: &str, name: &str) -> Resource {
         RawResource::new(uri, name.to_string()).no_annotation()
+    }
+
+    /// Generate embedding for a question using the same model that was used for documents
+    async fn generate_question_embedding(&self, question: &str) -> Result<Array1<f32>, McpError> {
+        // First try Ollama (preferred for consistency)
+        if let Some(ollama_client) = OLLAMA_CLIENT.get() {
+            match generate_single_ollama_embedding(ollama_client, question, "nomic-embed-text").await {
+                Ok(embedding) => return Ok(embedding),
+                Err(e) => {
+                    eprintln!("Failed to generate question embedding with Ollama: {}", e);
+                    self.send_log(
+                        LoggingLevel::Warning,
+                        format!("Ollama embedding failed, trying OpenAI fallback: {}", e),
+                    );
+                }
+            }
+        }
+
+        // Fallback to OpenAI if Ollama fails or is not available
+        if let Some(openai_client) = OPENAI_CLIENT.get() {
+            let embedding_model: String = env::var("EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "text-embedding-3-small".to_string());
+            
+            let question_embedding_request = CreateEmbeddingRequestArgs::default()
+                .model(embedding_model)
+                .input(question.to_string())
+                .build()
+                .map_err(|e| {
+                    McpError::internal_error(format!("Failed to build embedding request: {}", e), None)
+                })?;
+
+            let question_embedding_response = openai_client
+                .embeddings()
+                .create(question_embedding_request)
+                .await
+                .map_err(|e| McpError::internal_error(format!("OpenAI API error: {}", e), None))?;
+
+            let question_embedding = question_embedding_response.data.first().ok_or_else(|| {
+                McpError::internal_error("Failed to get embedding for question", None)
+            })?;
+
+            return Ok(Array1::from(question_embedding.embedding.clone()));
+        }
+
+        Err(McpError::internal_error(
+            "No embedding client available (neither Ollama nor OpenAI)",
+            None,
+        ))
     }
 }
 
 // --- Tool Implementation ---
 
-#[tool(tool_box)] // Add tool_box here as well, mirroring the example
-// Tool methods go in a regular impl block
+#[tool(tool_box)]
 impl RustDocsServer {
-    // Define the tool using the tool macro
-    // Name removed; will be handled dynamically by overriding list_tools/get_tool
     #[tool(
         description = "Query documentation for a specific Rust crate using semantic search and LLM summarization."
     )]
     async fn query_rust_docs(
         &self,
-        #[tool(aggr)] // Aggregate arguments into the struct
+        #[tool(aggr)]
         args: QueryRustDocsArgs,
     ) -> Result<CallToolResult, McpError> {
         // --- Send Startup Message (if not already sent) ---
@@ -145,19 +181,14 @@ impl RustDocsServer {
         if !*sent_guard {
             let mut msg_guard = self.startup_message.lock().await;
             if let Some(message) = msg_guard.take() {
-                // Take the message out
                 self.send_log(LoggingLevel::Info, message);
-                *sent_guard = true; // Mark as sent
+                *sent_guard = true;
             }
-            // Drop guards explicitly to avoid holding locks longer than needed
             drop(msg_guard);
             drop(sent_guard);
         } else {
-            // Drop guard if already sent
             drop(sent_guard);
         }
-
-        // Argument validation for crate_name removed
 
         let question = &args.question;
 
@@ -170,32 +201,8 @@ impl RustDocsServer {
             ),
         );
 
-        // --- Embedding Generation for Question ---
-        let client = OPENAI_CLIENT
-            .get()
-            .ok_or_else(|| McpError::internal_error("OpenAI client not initialized", None))?;
-
-        let embedding_model: String =
-            env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
-        let question_embedding_request = CreateEmbeddingRequestArgs::default()
-            .model(embedding_model)
-            .input(question.to_string())
-            .build()
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to build embedding request: {}", e), None)
-            })?;
-
-        let question_embedding_response = client
-            .embeddings()
-            .create(question_embedding_request)
-            .await
-            .map_err(|e| McpError::internal_error(format!("OpenAI API error: {}", e), None))?;
-
-        let question_embedding = question_embedding_response.data.first().ok_or_else(|| {
-            McpError::internal_error("Failed to get embedding for question", None)
-        })?;
-
-        let question_vector = Array1::from(question_embedding.embedding.clone());
+        // --- Generate question embedding using the same model as documents ---
+        let question_vector = self.generate_question_embedding(question).await?;
 
         // --- Find Best Matching Document ---
         let mut best_match: Option<(&str, f32)> = None;
@@ -208,11 +215,23 @@ impl RustDocsServer {
 
         // --- Generate Response using LLM ---
         let response_text = match best_match {
-            Some((best_path, _score)) => {
-                eprintln!("Best match found: {}", best_path);
+            Some((best_path, score)) => {
+                eprintln!("Best match found: {} (similarity: {:.3})", best_path, score);
+                
+                // Log the similarity score via MCP
+                self.send_log(
+                    LoggingLevel::Info,
+                    format!("Best matching document: {} (similarity: {:.3})", best_path, score),
+                );
+
                 let context_doc = self.documents.iter().find(|doc| doc.path == best_path);
 
                 if let Some(doc) = context_doc {
+                    // Ensure we have an OpenAI client for chat completion
+                    let openai_client = OPENAI_CLIENT.get().ok_or_else(|| {
+                        McpError::internal_error("OpenAI client not available for chat completion", None)
+                    })?;
+
                     let system_prompt = format!(
                         "You are an expert technical assistant for the Rust crate '{}'. \
                          Answer the user's question based *only* on the provided context. \
@@ -259,7 +278,7 @@ impl RustDocsServer {
                             )
                         })?;
 
-                    let chat_response = client.chat().create(chat_request).await.map_err(|e| {
+                    let chat_response = openai_client.chat().create(chat_request).await.map_err(|e| {
                         McpError::internal_error(format!("OpenAI chat API error: {}", e), None)
                     })?;
 
@@ -285,42 +304,43 @@ impl RustDocsServer {
 
 // --- ServerHandler Implementation ---
 
-#[tool(tool_box)] // Use imported tool macro directly
+#[tool(tool_box)]
 impl ServerHandler for RustDocsServer {
     fn get_info(&self) -> ServerInfo {
-        // Define capabilities using the builder
         let capabilities = ServerCapabilities::builder()
-            .enable_tools() // Enable tools capability
-            .enable_logging() // Enable logging capability
-            // Add other capabilities like resources, prompts if needed later
+            .enable_tools()
+            .enable_logging()
             .build();
 
+        // Determine which embedding model is being used
+        let embedding_info = if OLLAMA_CLIENT.get().is_some() {
+            "locally with Ollama/nomic-embed-text"
+        } else {
+            "with OpenAI"
+        };
+
         ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05, // Use latest known version
+            protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities,
             server_info: Implementation {
                 name: "rust-docs-mcp-server".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
-            // Provide instructions based on the specific crate
             instructions: Some(format!(
                 "This server provides tools to query documentation for the '{}' crate. \
                  Use the 'query_rust_docs' tool with a specific question to get information \
-                 about its API, usage, and examples, derived from its official documentation.",
-                self.crate_name
+                 about its API, usage, and examples, derived from its official documentation. \
+                 Embeddings are generated {}.",
+                self.crate_name, embedding_info
             )),
         }
     }
-
-    // --- Placeholder Implementations for other ServerHandler methods ---
-    // Implement these properly if resource/prompt features are added later.
 
     async fn list_resources(
         &self,
         _request: PaginatedRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        // Example: Return the crate name as a resource
         Ok(ListResourcesResult {
             resources: vec![
                 self._create_resource_text(&format!("crate://{}", self.crate_name), "crate_name"),
@@ -338,7 +358,7 @@ impl ServerHandler for RustDocsServer {
         if request.uri == expected_uri {
             Ok(ReadResourceResult {
                 contents: vec![ResourceContents::text(
-                    self.crate_name.as_str(), // Explicitly get &str from Arc<String>
+                    self.crate_name.as_str(),
                     &request.uri,
                 )],
             })
@@ -357,7 +377,7 @@ impl ServerHandler for RustDocsServer {
     ) -> Result<ListPromptsResult, McpError> {
         Ok(ListPromptsResult {
             next_cursor: None,
-            prompts: Vec::new(), // No prompts defined yet
+            prompts: Vec::new(),
         })
     }
 
@@ -367,7 +387,6 @@ impl ServerHandler for RustDocsServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
         Err(McpError::invalid_params(
-            // Or prompt_not_found if that exists
             format!("Prompt not found: {}", request.name),
             None,
         ))
@@ -380,7 +399,7 @@ impl ServerHandler for RustDocsServer {
     ) -> Result<ListResourceTemplatesResult, McpError> {
         Ok(ListResourceTemplatesResult {
             next_cursor: None,
-            resource_templates: Vec::new(), // No templates defined yet
+            resource_templates: Vec::new(),
         })
     }
 }
