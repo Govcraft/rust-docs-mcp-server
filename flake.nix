@@ -1,12 +1,15 @@
 {
-  description = "Multi-environment project example";
+  description = "Rust documentation MCP server";
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     dev-environments.url = "github:Govcraft/dev-environments";
+    crane = {
+      url = "github:ipetkov/crane";
+    };
   };
   outputs =
-    inputs@{ flake-parts, nixpkgs, ... }:
+    inputs@{ flake-parts, nixpkgs, crane, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         inputs.dev-environments.flakeModules.rust
@@ -29,7 +32,39 @@
           system,
           ...
         }:
+        let
+          craneLib = inputs.crane.mkLib pkgs;
+
+          # Common arguments shared between all builds
+          commonArgs = {
+            src = craneLib.cleanCargoSource ./.;
+            buildInputs = with pkgs; [
+              openssl
+            ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              # Additional darwin specific inputs
+              pkgs.darwin.apple_sdk.frameworks.Security
+              pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+            ];
+            nativeBuildInputs = with pkgs; [
+              pkg-config
+              perl
+            ];
+          };
+
+          # Build *just* the cargo dependencies
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+          # Build the actual crate itself
+          rustdocs-mcp-server = craneLib.buildPackage (commonArgs // {
+            inherit cargoArtifacts;
+          });
+        in
         {
+          # Add the package
+          packages = {
+            default = rustdocs-mcp-server;
+            rustdocs-mcp-server = rustdocs-mcp-server;
+          };
 
           # Golang Development Environment Options
           # ----------------------------------
@@ -101,6 +136,14 @@
               ls -la ${pkgs.openssl.out}/lib || echo "Failed to list OpenSSL lib directory"
               echo ">>> OpenSSL environment variables set by shellHook <<<"
             '';
+          };
+
+          # Add app for `nix run`
+          apps = {
+            default = {
+              type = "app";
+              program = "${rustdocs-mcp-server}/bin/rustdocs_mcp_server";
+            };
           };
         };
     };
