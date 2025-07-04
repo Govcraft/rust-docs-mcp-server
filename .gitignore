@@ -12,3 +12,6 @@ doc
 debug/
 storage/
 .roo/
+
+# claude
+.mcp.json

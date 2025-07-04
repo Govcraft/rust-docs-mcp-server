@@ -111,25 +111,30 @@ necessary for crates that require specific features to be enabled for
 `cargo doc` to succeed (e.g., crates requiring a runtime feature like
 `async-stripe`).
 
+
+#### Multi-Crate Mode
+
+You can also run a single server instance that provides documentation for multiple crates by listing them as arguments:
+
 ```bash
 # Set the API key (replace with your actual key)
 export OPENAI_API_KEY="sk-..."
 
-# Example: Run server for the latest 1.x version of serde
-rustdocs_mcp_server "serde@^1.0"
+# Example: Run server for multiple crates
+rust-mcp-docs rmcp serde chrono:serde tokio openai tera dotenvy clap:derive:env
 
-# Example: Run server for a specific version of reqwest
-rustdocs_mcp_server "reqwest@0.12.0"
-
-# Example: Run server for the latest version of tokio
-rustdocs_mcp_server tokio
-
-# Example: Run server for async-stripe, enabling a required runtime feature
-rustdocs_mcp_server "async-stripe@0.40" -F runtime-tokio-hyper-rustls
-
-# Example: Run server for another crate with multiple features
-rustdocs_mcp_server "some-crate@1.2" --features feat1,feat2
+# This creates tools for each crate:
+# - query_rmcp_docs
+# - query_serde_docs
+# - query_chrono_docs  
+# - query_tokio_docs
+# - query_openai_docs
+# - query_tera_docs
+# - query_dotenvy_docs
+# - query_clap_docs
 ```
+
+In multi-crate mode, crate specifications can include features after a colon (e.g., `chrono:serde`, `clap:derive:env`). Each crate will have its own documentation tool named `query_{crate_name}_docs`.
 
 On the first run for a specific crate version _and feature set_, the server
 will:
