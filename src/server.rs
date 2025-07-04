@@ -285,7 +285,6 @@ impl RustDocsServer {
 
 // --- ServerHandler Implementation ---
 
-#[tool(tool_box)] // Use imported tool macro directly
 impl ServerHandler for RustDocsServer {
     fn get_info(&self) -> ServerInfo {
         // Define capabilities using the builder
@@ -381,6 +380,58 @@ impl ServerHandler for RustDocsServer {
         Ok(ListResourceTemplatesResult {
             next_cursor: None,
             resource_templates: Vec::new(), // No templates defined yet
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let dynamic_tool_name = format!("query_{}_docs", self.crate_name.replace('-', "_"));
+        
+        if request.name == dynamic_tool_name {
+            // Parse the arguments for our tool
+            let args: QueryRustDocsArgs = serde_json::from_value(request.arguments.into())
+                .map_err(|e| McpError::invalid_params(format!("Invalid arguments: {}", e), None))?;
+            
+            // Call our existing tool method
+            self.query_rust_docs(args).await
+        } else {
+            Err(McpError::invalid_params(
+                format!("Tool '{}' not found", request.name),
+                None,
+            ))
+        }
+    }
+
+    async fn list_tools(
+        &self,
+        _request: rmcp::model::PaginatedRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, McpError> {
+        let dynamic_tool_name = format!("query_{}_docs", self.crate_name.replace('-', "_"));
+        
+        let mut generator = schemars::r#gen::SchemaGenerator::default();
+        let schema = QueryRustDocsArgs::json_schema(&mut generator);
+        
+        let tool = rmcp::model::Tool {
+            name: dynamic_tool_name.into(),
+            description: format!(
+                "Query documentation for the '{}' crate using semantic search and LLM summarization.",
+                self.crate_name
+            ).into(),
+            input_schema: serde_json::to_value(schema)
+                .map_err(|e| McpError::internal_error(format!("Failed to generate schema: {}", e), None))?
+                .as_object()
+                .cloned()
+                .map(Arc::new)
+                .unwrap_or_else(|| Arc::new(serde_json::Map::new())),
+        };
+
+        Ok(rmcp::model::ListToolsResult {
+            tools: vec![tool],
+            next_cursor: None,
         })
     }
 }
