@@ -1,0 +1,14 @@
+build/
+node_modules/
+
+
+# Added by cargo
+
+/target
+.direnv/
+.env
+doc
+.rust*
+debug/
+storage/
+.roo/
