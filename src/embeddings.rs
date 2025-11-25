@@ -50,7 +50,12 @@ pub async fn generate_embeddings(
     let bpe = Arc::new(cl100k_base().map_err(|e| ServerError::Tiktoken(e.to_string()))?);
 
     const CONCURRENCY_LIMIT: usize = 8; // Number of concurrent requests
-    const TOKEN_LIMIT: usize = 8000; // Keep a buffer below the 8192 limit
+
+    // Our default model only supports roughly 8k tokens
+    let token_limit: usize = std::env::var("EMBEDDING_TOKEN_LIMIT")
+        .ok()
+        .and_then(|lim| lim.trim().parse().ok())
+        .unwrap_or(8000);
 
     let results = stream::iter(documents.iter().enumerate())
         .map(|(index, doc)| {
@@ -64,12 +69,12 @@ pub async fn generate_embeddings(
                 // Calculate token count for this document
                 let token_count = bpe.encode_with_special_tokens(&doc.content).len();
 
-                if token_count > TOKEN_LIMIT {
+                if token_count > token_limit {
                     // eprintln!(
                     //     "    Skipping document {}: Actual tokens ({}) exceed limit ({}). Path: {}",
                     //     index + 1,
                     //     token_count,
-                    //     TOKEN_LIMIT,
+                    //     token_limit,
                     //     doc.path
                     // );
                     // Return Ok(None) to indicate skipping, with 0 tokens processed for this doc
