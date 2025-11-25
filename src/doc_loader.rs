@@ -126,8 +126,7 @@ edition = "2021"
     // Iterate through subdirectories in `target/doc` and find the one containing `index.html`.
     let base_doc_path = temp_dir_path.join("doc");
 
-    let mut target_docs_path: Option<PathBuf> = None;
-    let mut found_count = 0;
+    let mut found_paths: Vec<PathBuf> = Vec::new();
 
     if base_doc_path.is_dir() {
         for entry_result in fs::read_dir(&base_doc_path)? {
@@ -136,31 +135,58 @@ edition = "2021"
                 let dir_path = entry.path();
                 let index_html_path = dir_path.join("index.html");
                 if index_html_path.is_file() {
-                    if target_docs_path.is_none() {
-                        target_docs_path = Some(dir_path);
-                    }
-                    found_count += 1;
-                } else {
+                    found_paths.push(dir_path);
                 }
             }
         }
+        eprintln!("[DEBUG] Found {} directories with index.html files", found_paths.len());
+        for (i, path) in found_paths.iter().enumerate() {
+            eprintln!("[DEBUG] Directory {}: {}", i + 1, path.display());
+        }
     }
 
-    let docs_path = match (found_count, target_docs_path) {
-        (1, Some(path)) => {
-            path
-        },
-        (0, _) => {
+    let docs_path = match found_paths.len() {
+        0 => {
             return Err(DocLoaderError::CargoLib(anyhow::anyhow!(
                 "Could not find any subdirectory containing index.html within '{}'. Cargo doc might have failed or produced unexpected output.",
                 base_doc_path.display()
             )));
         },
-        (count, _) => {
-             return Err(DocLoaderError::CargoLib(anyhow::anyhow!(
-                "Expected exactly one subdirectory containing index.html within '{}', but found {}. Cannot determine the correct documentation path.",
-                base_doc_path.display(), count
-            )));
+        1 => {
+            found_paths.into_iter().next().unwrap()
+        },
+        _ => {
+            // Multiple directories found - look specifically for the crate name directory
+            let crate_name_normalized = crate_name.replace('-', "_");
+            eprintln!("[DEBUG] Multiple directories found, looking for crate directory: {}", crate_name_normalized);
+            
+            // Find the directory that matches the crate name
+            let matching_dir = found_paths.iter().find(|path| {
+                if let Some(dir_name) = path.file_name() {
+                    if let Some(dir_name_str) = dir_name.to_str() {
+                        return dir_name_str == crate_name_normalized;
+                    }
+                }
+                false
+            });
+            
+            match matching_dir {
+                Some(crate_dir) => {
+                    eprintln!("[DEBUG] Found crate-specific directory: {}", crate_dir.display());
+                    crate_dir.clone()
+                },
+                None => {
+                    eprintln!("[DEBUG] Crate-specific directory '{}' not found in available directories:", crate_name_normalized);
+                    for path in &found_paths {
+                        if let Some(dir_name) = path.file_name() {
+                            eprintln!("[DEBUG]   - {}", dir_name.to_string_lossy());
+                        }
+                    }
+                    // Fallback to the first directory found
+                    eprintln!("[DEBUG] Using first available directory: {}", found_paths[0].display());
+                    found_paths.into_iter().next().unwrap()
+                }
+            }
         }
     };
     // --- End finding documentation directory ---
