@@ -129,18 +129,48 @@ edition = "2021"
     let mut target_docs_path: Option<PathBuf> = None;
     let mut found_count = 0;
 
+    // Convert crate name with hyphens to underscores for directory matching
+    let expected_dir_name = crate_name.replace("-", "_");
+
     if base_doc_path.is_dir() {
+        eprintln!("Looking for documentation in: {}", base_doc_path.display());
+        eprintln!("Target crate directory name: {}", expected_dir_name);
+
         for entry_result in fs::read_dir(&base_doc_path)? {
             let entry = entry_result?;
             if entry.file_type()?.is_dir() {
                 let dir_path = entry.path();
+                let dir_name = dir_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+
+                eprintln!("  Found directory: {}", dir_name);
+
+                // Skip the temp crate's own documentation
+                if dir_name == "temp_doc_crate" {
+                    eprintln!("    -> Skipping temp_doc_crate");
+                    continue;
+                }
+
                 let index_html_path = dir_path.join("index.html");
                 if index_html_path.is_file() {
-                    if target_docs_path.is_none() {
+                    eprintln!("    -> Has index.html");
+
+                    // Prefer the directory that matches our target crate name
+                    if dir_name == expected_dir_name {
+                        eprintln!("    -> MATCHES target crate name!");
                         target_docs_path = Some(dir_path);
+                        found_count = 1; // Reset count since we found our target
+                        break; // Stop searching, we found what we want
+                    } else if target_docs_path.is_none() {
+                        // Keep as fallback if we don't find exact match
+                        target_docs_path = Some(dir_path);
+                        found_count += 1;
+                    } else {
+                        found_count += 1;
                     }
-                    found_count += 1;
                 } else {
+                    eprintln!("    -> No index.html");
                 }
             }
         }
@@ -201,7 +231,7 @@ edition = "2021"
         }
     }
 
-    // --- Initialize paths_to_process and explicitly add the root index.html if it exists --- 
+    // --- Initialize paths_to_process and explicitly add the root index.html if it exists ---
     let mut paths_to_process: Vec<PathBuf> = Vec::new();
     let root_index_path = docs_path.join("index.html");
     if root_index_path.is_file() {
