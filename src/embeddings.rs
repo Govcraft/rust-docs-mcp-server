@@ -52,12 +52,11 @@ pub async fn generate_embeddings(
     const CONCURRENCY_LIMIT: usize = 8; // Number of concurrent requests
     const TOKEN_LIMIT: usize = 8000; // Keep a buffer below the 8192 limit
 
-    let results = stream::iter(documents.iter().enumerate())
+    let results = stream::iter(documents.iter().enumerate().map(|(i, d)| (i, d.clone())).collect::<Vec<_>>())
         .map(|(index, doc)| {
             // Clone client, model, doc, and Arc<BPE> for the async block
             let client = client.clone();
             let model = model.to_string();
-            let doc = doc.clone();
             let bpe = Arc::clone(&bpe); // Clone the Arc pointer
 
             async move {
